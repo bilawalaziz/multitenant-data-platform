@@ -1,0 +1,12 @@
+{
+  "device_id": "$.deviceId",
+  "sensor_id": { "path": "$.sensorId", "transforms": ["trim"] },
+  "value": { "path": "$.temperature", "transforms": ["toNumber"] },
+  "unit": {
+    "path": "$.unit",
+    "transforms": ["lowercase"],
+    "map": { "celsius": "CELSIUS", "fahrenheit": "FAHRENHEIT" }
+  },
+  "event_timestamp": { "path": "$.recordedAt", "transforms": ["isoTimestamp"] },
+  "metadata.site": { "path": "$.location.site", "default": "unknown" }
+}

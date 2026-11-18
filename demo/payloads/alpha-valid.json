@@ -1,0 +1,9 @@
+{
+  "deviceId": "MACHINE-001",
+  "sensorId": "TEMP-001",
+  "temperature": 92.5,
+  "unit": "celsius",
+  "recordedAt": "2026-11-17T14:30:00Z",
+  "location": { "site": "plant-1", "line": "A" },
+  "tags": ["boiler"]
+}

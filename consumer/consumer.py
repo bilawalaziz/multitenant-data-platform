@@ -1,0 +1,218 @@
+"""Downstream consumer of canonical sensor events.
+
+Delivery is at-least-once. Auto-commit is off and the offset is committed synchronously after a message has been
+validated, quality-checked and recorded for deduplication.
+
+Messages that are not valid JSON or miss canonical fields are logged as errors and committed (skipped), so one bad
+record cannot block a partition; a real deployment would send them to a dead-letter topic. Duplicates (same event_id,
+tracked in sqlite on a volume) are logged and committed. Topics that do not exist yet are tolerated because tenants
+are created at runtime; the consumer picks them up through periodic metadata refresh. Infrastructure failures such
+as a sqlite error do not commit: the consumer seeks back and retries. On SIGTERM/SIGINT it finishes the current
+message, commits and closes. All log lines are single-line JSON.
+"""
+
+import json
+import os
+import signal
+import sqlite3
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+
+REQUIRED_FIELDS = {
+    "event_id": str,
+    "schema_version": str,
+    "tenant_id": str,
+    "ingestion_id": str,
+    "contract_id": str,
+    "contract_version": int,
+    "device_id": str,
+    "sensor_id": str,
+    "value": (int, float),
+    "unit": str,
+    "event_timestamp": str,
+    "received_at": str,
+}
+UNIT_RANGES = {"CELSIUS": (-50.0, 150.0), "FAHRENHEIT": (-58.0, 302.0)}
+MAX_FUTURE_SKEW = timedelta(minutes=5)
+
+
+def log(level, msg, **fields):
+    rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"), "level": level, "msg": msg}
+    rec.update(fields)
+    print(json.dumps(rec, default=str), flush=True)
+
+
+def parse_ts(s):
+    """Parse an ISO-8601 instant (Z or offset); returns an aware datetime or None."""
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def validate_event(ev):
+    """Return a list of problems (empty list = valid canonical event)."""
+    if not isinstance(ev, dict):
+        return ["event is not a JSON object"]
+    problems = []
+    for name, typ in REQUIRED_FIELDS.items():
+        if name not in ev or ev[name] is None:
+            problems.append(f"missing field {name}")
+            continue
+        v = ev[name]
+        if isinstance(v, bool) or not isinstance(v, typ):
+            problems.append(f"field {name} has wrong type {type(v).__name__}")
+        elif isinstance(v, str) and not v.strip():
+            problems.append(f"field {name} is empty")
+    for name in ("event_timestamp", "received_at"):
+        if isinstance(ev.get(name), str) and parse_ts(ev[name]) is None:
+            problems.append(f"field {name} is not an ISO-8601 timestamp")
+    if ev.get("metadata") is not None and not isinstance(ev["metadata"], dict):
+        problems.append("field metadata must be an object")
+    return problems
+
+
+def dq_warnings(ev, now=None):
+    """Data-quality warnings for a structurally valid event."""
+    now = now or datetime.now(timezone.utc)
+    out = []
+    rng = UNIT_RANGES.get(ev["unit"])
+    if rng is None:
+        out.append(f"no plausible range known for unit {ev['unit']}")
+    elif not rng[0] <= ev["value"] <= rng[1]:
+        out.append(f"value {ev['value']} outside plausible range {rng[0]}..{rng[1]} for {ev['unit']}")
+    ts = parse_ts(ev["event_timestamp"])
+    if ts is not None and ts > now + MAX_FUTURE_SKEW:
+        out.append(f"event_timestamp {ev['event_timestamp']} is more than 5 minutes in the future")
+    return out
+
+
+class DedupStore:
+    def __init__(self, path):
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        self.db = sqlite3.connect(path)
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS processed_events ("
+            "event_id TEXT PRIMARY KEY, tenant_id TEXT, processed_at TEXT)"
+        )
+        self.db.commit()
+
+    def first_seen(self, event_id, tenant_id):
+        """True if event_id was not seen before (and records it)."""
+        cur = self.db.execute(
+            "INSERT OR IGNORE INTO processed_events VALUES (?,?,?)",
+            (event_id, tenant_id, datetime.now(timezone.utc).isoformat()),
+        )
+        self.db.commit()
+        return cur.rowcount == 1
+
+    def close(self):
+        self.db.close()
+
+
+def process_payload(raw, store, kafka_meta=None):
+    """Process one message body. Returns 'processed' | 'duplicate' | 'invalid'. Never raises on bad data."""
+    meta = kafka_meta or {}
+    try:
+        ev = json.loads(raw)
+    except (ValueError, TypeError) as e:  # UnicodeDecodeError is a ValueError
+        log("ERROR", "invalid message: not JSON", reason=str(e), **meta)
+        return "invalid"
+    problems = validate_event(ev)
+    if problems:
+        log(
+            "ERROR",
+            "invalid message: canonical validation failed",
+            problems=problems,
+            event_id=ev.get("event_id") if isinstance(ev, dict) else None,
+            **meta,
+        )
+        return "invalid"
+    ids = {"event_id": ev["event_id"], "tenant_id": ev["tenant_id"], "device_id": ev["device_id"]}
+    if not store.first_seen(ev["event_id"], ev["tenant_id"]):
+        log("INFO", "duplicate event skipped", **ids, **meta)
+        return "duplicate"
+    for w in dq_warnings(ev):
+        log("WARN", "data quality warning", dq_warning=w, **ids, **meta)
+    log(
+        "INFO",
+        "event processed",
+        **ids,
+        sensor_id=ev["sensor_id"],
+        value=ev["value"],
+        unit=ev["unit"],
+        event_timestamp=ev["event_timestamp"],
+        **meta,
+    )
+    return "processed"
+
+
+def main():
+    from confluent_kafka import Consumer, KafkaException, TopicPartition
+
+    bootstrap = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9094")
+    topics = [
+        t.strip()
+        for t in os.environ.get("TOPICS", "tenant-alpha.readings,tenant-beta.readings").split(",")
+        if t.strip()
+    ]
+    group = os.environ.get("GROUP_ID", "sensor-readings-consumer")
+    store = DedupStore(os.environ.get("DEDUP_DB_PATH", "/data/dedup.sqlite"))
+    running = True
+
+    def stop(signum, _frame):
+        nonlocal running
+        running = False
+        log("INFO", "shutdown signal received", signal=signum)
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    consumer = Consumer(
+        {
+            "bootstrap.servers": bootstrap,
+            "group.id": group,
+            "enable.auto.commit": False,
+            "auto.offset.reset": "earliest",
+            "topic.metadata.refresh.interval.ms": 10000,  # pick up topics created later by tenant registration
+            "allow.auto.create.topics": False,
+        }
+    )
+    consumer.subscribe(topics)
+    log("INFO", "consumer started", bootstrap=bootstrap, topics=topics, group_id=group)
+    try:
+        while running:
+            msg = consumer.poll(1.0)
+            if msg is None:
+                continue
+            err = msg.error()
+            if err is not None:
+                # unknown topic/partition (topic not created yet) is expected and non-fatal
+                log("WARN", "kafka consumer error (continuing)", error=str(err), code=err.code())
+                time.sleep(1)
+                continue
+            meta = {"topic": msg.topic(), "partition": msg.partition(), "offset": msg.offset()}
+            try:
+                process_payload(msg.value(), store, meta)
+            except Exception as e:  # infrastructure failure: do not commit, rewind and retry
+                log("ERROR", "processing failed; offset not committed, will retry", error=repr(e), **meta)
+                consumer.seek(TopicPartition(msg.topic(), msg.partition(), msg.offset()))
+                time.sleep(1)
+                continue
+            consumer.commit(message=msg, asynchronous=False)
+    except KafkaException as e:
+        log("ERROR", "fatal kafka error", error=str(e))
+        return 1
+    finally:
+        consumer.close()
+        store.close()
+        log("INFO", "consumer stopped")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

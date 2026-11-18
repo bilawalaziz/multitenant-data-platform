@@ -1,0 +1,11 @@
+package com.platform.ingestion.observability;
+
+/** MDC keys attached to log lines (rendered as fields by the logstash format). */
+public final class MdcKeys {
+
+    public static final String TENANT_ID = "tenantId";
+    public static final String INGESTION_ID = "ingestionId";
+    public static final String EVENT_ID = "eventId";
+
+    private MdcKeys() {}
+}

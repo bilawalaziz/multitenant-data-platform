@@ -1,0 +1,7 @@
+title = "sensor-ingestion-platform"
+
+# Default rules only. The dev placeholders in .env.example and the ${...} values in the Keycloak
+# realm file do not trigger any rule, so nothing is allowlisted. Add an entry here only for a
+# specific, reviewed false positive.
+[extend]
+useDefault = true

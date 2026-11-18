@@ -1,0 +1,6 @@
+# Accepted vulnerabilities. Keep this list short and re-check it on every Spring Boot upgrade.
+
+# spring-webmvc 6.2.19 is the latest Spring Framework 6.2 release; the fix is only available in 7.0.9,
+# which requires Spring Boot 4. Remove these entries when the project moves to Spring Boot 4.
+CVE-2026-47884
+CVE-2026-47890

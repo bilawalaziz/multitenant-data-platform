@@ -1,0 +1,55 @@
+openapi: 3.0.3
+info:
+  title: Tenant Alpha Sensor Readings
+  version: 1.0.0
+  description: Reading format used by tenant-alpha devices (camelCase).
+paths:
+  /readings:
+    post:
+      summary: Submit a temperature reading
+      operationId: submitAlphaReading
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlphaReading'
+      responses:
+        '202':
+          description: Accepted
+components:
+  schemas:
+    AlphaReading:
+      type: object
+      required: [deviceId, sensorId, temperature, unit, recordedAt]
+      properties:
+        deviceId:
+          type: string
+          pattern: '^MACHINE-[0-9]{3}$'
+        sensorId:
+          type: string
+          minLength: 1
+        temperature:
+          type: number
+          minimum: -50
+          maximum: 500
+        unit:
+          type: string
+          enum: [celsius, fahrenheit]
+        recordedAt:
+          type: string
+          format: date-time
+        location:
+          $ref: '#/components/schemas/Location'
+        tags:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+    Location:
+      type: object
+      properties:
+        site:
+          type: string
+        line:
+          type: string

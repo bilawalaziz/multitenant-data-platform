@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pre-commit==4.0.1
+      - name: Run pre-commit hooks
+        # The Java format check runs in the build job as part of mvn verify.
+        env:
+          SKIP: spotless
+        run: pre-commit run --all-files --show-diff-on-failure
+
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - name: Pin the Docker API version for Testcontainers
+        run: printf 'api.version=1.44\n' > ~/.docker-java.properties
+      - run: ./mvnw -B -ntp verify
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            target/surefire-reports
+            target/failsafe-reports
+          if-no-files-found: ignore
+
+  consumer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Unit tests
+        # The tests do not import confluent_kafka, so the requirements are not installed here.
+        run: python -m unittest discover -s consumer -v
+      - run: python -m py_compile scripts/demo.py
+
+  docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose --env-file .env.example config -q
+      - run: docker build -t sensor-ingestion-platform:ci .
+      - run: docker build -t sensor-consumer:ci consumer
+      # Fails the build on any fixable critical finding. Accepted exceptions are listed in .trivyignore.
+      - name: Check fixable critical vulnerabilities in the application image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: sensor-ingestion-platform:ci
+          severity: CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          exit-code: "1"
+          format: table
+      - name: Report critical and high findings in the application image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: sensor-ingestion-platform:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"
+          format: table
+      - name: Scan repository dependencies
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"
+          format: table

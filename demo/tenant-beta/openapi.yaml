@@ -1,0 +1,52 @@
+openapi: 3.0.3
+info:
+  title: Tenant Beta Sensor Readings
+  version: 1.0.0
+  description: Reading format used by tenant-beta devices (snake_case, nested diagnostics).
+paths:
+  /readings:
+    post:
+      summary: Submit a temperature reading
+      operationId: submitBetaReading
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BetaReading'
+      responses:
+        '202':
+          description: Accepted
+components:
+  schemas:
+    BetaReading:
+      type: object
+      required: [device_code, sensor_code, reading, measurement_unit, timestamp]
+      properties:
+        device_code:
+          type: string
+          pattern: '^MACHINE-[0-9]{3}$'
+        sensor_code:
+          type: string
+          minLength: 1
+        reading:
+          type: number
+          minimum: -100
+          maximum: 1000
+        measurement_unit:
+          type: string
+          enum: [celsius, fahrenheit]
+        timestamp:
+          type: string
+          format: date-time
+        diagnostics:
+          $ref: '#/components/schemas/Diagnostics'
+    Diagnostics:
+      type: object
+      properties:
+        battery_pct:
+          type: number
+          minimum: 0
+          maximum: 100
+        firmware:
+          type: string

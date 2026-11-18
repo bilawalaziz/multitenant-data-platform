@@ -1,0 +1,13 @@
+{
+  "device_id": "$.device_code",
+  "sensor_id": { "path": "$.sensor_code", "transforms": ["trim"] },
+  "value": { "path": "$.reading", "transforms": ["toNumber"] },
+  "unit": {
+    "path": "$.measurement_unit",
+    "transforms": ["lowercase"],
+    "map": { "celsius": "CELSIUS", "fahrenheit": "FAHRENHEIT" }
+  },
+  "event_timestamp": { "path": "$.timestamp", "transforms": ["isoTimestamp"] },
+  "metadata.firmware": { "path": "$.diagnostics.firmware", "default": "unknown" },
+  "metadata.battery_pct": "$.diagnostics.battery_pct"
+}

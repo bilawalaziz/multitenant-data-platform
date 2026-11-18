@@ -1,0 +1,12 @@
+.git
+.env
+target
+docs
+demo
+infra
+consumer
+scripts/*.py
+**/__pycache__
+*.md
+.idea
+.vscode

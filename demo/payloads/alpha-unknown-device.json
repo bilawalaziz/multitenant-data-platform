@@ -1,0 +1,7 @@
+{
+  "deviceId": "MACHINE-999",
+  "sensorId": "TEMP-001",
+  "temperature": 21.0,
+  "unit": "celsius",
+  "recordedAt": "2026-11-17T14:30:00Z"
+}

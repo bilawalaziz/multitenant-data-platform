@@ -1,0 +1,106 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: sensor-ingestion-platform
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/sensor_platform}
+    username: ${DB_USER:sensor}
+    password: ${DB_PASSWORD:sensor_dev_pw}
+    hikari:
+      maximum-pool-size: 10
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: platform
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    schemas: platform
+    default-schema: platform
+    create-schemas: true
+    locations: classpath:db/migration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9094}
+    producer:
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        enable.idempotence: true
+        max.block.ms: 5000
+        delivery.timeout.ms: 10000
+        request.timeout.ms: 5000
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${KEYCLOAK_ISSUER_URI:http://localhost:8180/realms/sensor-platform}
+          jwk-set-uri: ${KEYCLOAK_JWK_SET_URI:http://localhost:8180/realms/sensor-platform/protocol/openid-connect/certs}
+  servlet:
+    multipart:
+      max-file-size: 1MB
+      max-request-size: 2MB
+  jackson:
+    default-property-inclusion: non_null
+
+platform:
+  security:
+    audience: sensor-platform-api
+  ingestion:
+    max-payload-bytes: 65536
+  kafka:
+    topic-partitions: 3
+    topic-replication-factor: 1
+    admin-timeout-ms: 5000
+    send-timeout-ms: 12000
+  outbox:
+    enabled: true
+    fixed-delay-ms: 1000
+    batch-size: 50
+    max-attempts: 50
+    backoff-base-ms: 1000
+    backoff-cap-ms: 30000
+    lease: 30s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    distribution:
+      percentiles-histogram:
+        ingestion.processing: true
+      slo:
+        ingestion.processing: 50ms,100ms,250ms,500ms,1s,2s
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+  api-docs:
+    path: /v3/api-docs
+
+logging:
+  level:
+    org.apache.kafka: WARN
+
+---
+spring:
+  config:
+    activate:
+      on-profile: docker
+logging:
+  structured:
+    format:
+      console: logstash
