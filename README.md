@@ -235,6 +235,13 @@ ruff format consumer scripts/demo.py
 
 `./mvnw verify` also runs `spotless:check`, so unformatted Java fails the build.
 
+To run the CI jobs locally before pushing, each in the same pinned Docker image CI uses (only Docker is needed):
+
+```bash
+bash scripts/ci-local.sh            # all jobs
+bash scripts/ci-local.sh build      # or: lint | consumer | docker | workflows
+```
+
 ## Design notes
 
 ### Multi-tenancy
