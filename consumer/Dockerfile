@@ -1,4 +1,4 @@
-FROM python:3.12.8-slim
+FROM python:3.15.2-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 RUN useradd --system --uid 10001 --create-home consumer && mkdir /data && chown consumer /data
 WORKDIR /app
