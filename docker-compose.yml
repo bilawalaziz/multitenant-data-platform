@@ -98,12 +98,15 @@ services:
       JAVA_OPTS: "-XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError -Xss512k"
     ports:
       - "${APP_HOST_PORT:-8080}:8080"
+      # management port for local diagnostics only
+      - "127.0.0.1:8081:8081"
     mem_limit: 768m
 
   prometheus:
     image: prom/prometheus:v3.5.0
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
     ports:
       - "${PROMETHEUS_HOST_PORT:-9090}:9090"

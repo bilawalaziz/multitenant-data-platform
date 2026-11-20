@@ -21,6 +21,7 @@ PYTHON_IMAGE=python:3.12.8
 PYTHON_SLIM_IMAGE=python:3.12.8-slim
 TRIVY_IMAGE=aquasec/trivy:0.70.0
 ACTIONLINT_IMAGE=rhysd/actionlint:1.7.4
+PROMETHEUS_IMAGE=prom/prometheus:v3.5.0
 
 # On Docker Desktop, containers started by Testcontainers are reached through host.docker.internal.
 TC_ENV=()
@@ -59,6 +60,11 @@ docker_job() {
   "${trivy[@]}" --severity CRITICAL --ignorefile /repo/.trivyignore --exit-code 1 sensor-ingestion-platform:ci
   echo "Fixable critical and high findings (report only):"
   "${trivy[@]}" --severity CRITICAL,HIGH --exit-code 0 sensor-ingestion-platform:ci
+  echo "Prometheus config and alert rules:"
+  local promtool=(docker run --rm --entrypoint promtool -v "$REPO/infra/prometheus":/etc/prometheus:ro "$PROMETHEUS_IMAGE")
+  "${promtool[@]}" check config /etc/prometheus/prometheus.yml
+  "${promtool[@]}" check rules /etc/prometheus/alerts.yml
+  "${promtool[@]}" test rules /etc/prometheus/alerts.test.yml
 }
 
 workflows() {

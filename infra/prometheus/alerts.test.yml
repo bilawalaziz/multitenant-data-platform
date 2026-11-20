@@ -1,0 +1,69 @@
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: app down
+    interval: 1m
+    input_series:
+      - series: 'up{job="sensor-ingestion-platform", instance="app:8081"}'
+        values: "1 1 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: AppDown
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: AppDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: sensor-ingestion-platform
+              instance: "app:8081"
+            exp_annotations:
+              summary: "The ingestion service is not reachable by Prometheus"
+
+  - name: failed outbox events
+    interval: 1m
+    input_series:
+      - series: "outbox_failed_events"
+        values: "0 0 3 3 3 3"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: OutboxFailedEvents
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: OutboxFailedEvents
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Outbox events exhausted their attempts and need an operator (requeue or investigate)"
+
+  - name: high rejection rate
+    interval: 1m
+    input_series:
+      - series: 'ingestion_requests_total{outcome="accepted"}'
+        values: "0+60x30"
+      - series: 'ingestion_requests_total{outcome="rejected"}'
+        values: "0+60x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: HighRejectionRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "More than 20% of ingestion requests were rejected over the last 10 minutes"
+
+  - name: few rejections do not alert
+    interval: 1m
+    input_series:
+      - series: 'ingestion_requests_total{outcome="accepted"}'
+        values: "0+60x30"
+      - series: 'ingestion_requests_total{outcome="rejected"}'
+        values: "0+1x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: HighRejectionRate
+        exp_alerts: []

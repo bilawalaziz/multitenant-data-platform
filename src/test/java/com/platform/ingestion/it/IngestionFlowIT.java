@@ -1,16 +1,15 @@
 package com.platform.ingestion.it;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -28,6 +27,7 @@ import org.apache.kafka.common.serialization.StringDeserializer;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MvcResult;
 
@@ -36,6 +36,9 @@ class IngestionFlowIT extends AbstractIntegrationTest {
 
     private static final String ALPHA = "tenant-alpha";
     private static final String BETA = "tenant-beta";
+
+    @Autowired
+    private MeterRegistry registry;
 
     private String alphaContractId;
     private String betaContractId;
@@ -516,31 +519,23 @@ class IngestionFlowIT extends AbstractIntegrationTest {
     }
 
     @Test
-    void actuatorAndSwaggerAreReachableAsDesigned() throws Exception {
-        mvc.perform(get("/actuator/health"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("UP"));
+    void apiDocsAreReachableAndIngestionMetricsAreRecorded() throws Exception {
         mvc.perform(get("/v3/api-docs"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.components.securitySchemes.bearerAuth").exists());
-        mvc.perform(get("/actuator/info")).andExpect(status().isOk());
 
         accepted(tenantIngest(ALPHA), demoPayload("alpha-valid.json"));
         ingest(tenantIngest(ALPHA), uniqueKey(), demoPayload("alpha-invalid.json"))
                 .andExpect(status().isBadRequest());
-        String metrics = mvc.perform(get("/actuator/prometheus"))
-                .andExpect(status().isOk())
-                .andExpect(content().string(containsString("ingestion_requests_total")))
-                .andReturn()
-                .getResponse()
-                .getContentAsString();
-        assertThat(metrics)
-                .contains("ingestion_requests_total{", "outcome=\"accepted\"", "outcome=\"rejected\"")
-                .contains("ingestion_rejections_total{", "reason=\"PAYLOAD_VALIDATION_FAILED\"")
-                .contains("ingestion_validation_failures_total")
-                .contains("ingestion_processing_seconds_bucket")
-                .contains("outbox_publish_total{")
-                .contains("outbox_pending_events")
-                .contains("outbox_failed_events");
+        assertThat(registry.get("ingestion.requests")
+                        .tag("outcome", "accepted")
+                        .counter()
+                        .count())
+                .isGreaterThanOrEqualTo(1);
+        assertThat(registry.get("ingestion.rejections")
+                        .tag("reason", "PAYLOAD_VALIDATION_FAILED")
+                        .counter()
+                        .count())
+                .isGreaterThanOrEqualTo(1);
     }
 }

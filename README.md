@@ -158,7 +158,7 @@ All endpoints require a bearer token unless marked public.
 | `POST /api/v1/tenants/{tenantId}/contracts/{contractId}/versions/{version}/activate` | platform-admin, tenant-admin (own) | activate a version |
 | `GET /api/v1/tenants/{tenantId}/ingestions?limit=`, `.../ingestions/{ingestionId}` | platform-admin, tenant-admin (own), tenant-ingest (own) | records with canonical event |
 | `GET`, `PUT /api/v1/tenants/{tenantId}/settings` | platform-admin, tenant-admin (own) | tenant schema settings |
-| `GET /actuator/health`, `/actuator/info`, `/actuator/prometheus` | public | health and metrics |
+| `GET /actuator/health`, `/actuator/info`, `/actuator/prometheus` | public, management port only (8081) | health and metrics |
 | `GET /swagger-ui.html`, `/v3/api-docs` | public | API docs |
 
 All errors share one body:
@@ -192,7 +192,7 @@ Compose reads `.env` (copy `.env.example`; all values there are throwaway demo v
 | `KEYCLOAK_ADMIN`, `KEYCLOAK_ADMIN_PASSWORD`, `KEYCLOAK_HOST_PORT` | Keycloak admin account and host port (8180) |
 | `DEMO_USER_PASSWORD` | password of the demo users (`platform-admin`, `alpha-admin`, `beta-admin`) |
 | `ALPHA_INGEST_CLIENT_SECRET`, `BETA_INGEST_CLIENT_SECRET` | client secrets of the ingestion service accounts |
-| `APP_HOST_PORT` | application host port (8080) |
+| `APP_HOST_PORT` | application host port (8080); the management port is published on 127.0.0.1:8081 only |
 | `PROMETHEUS_HOST_PORT`, `GRAFANA_HOST_PORT` | host ports (9090, 3000) |
 | `GRAFANA_ADMIN_USER`, `GRAFANA_ADMIN_PASSWORD` | Grafana admin account |
 | `CONSUMER_TOPICS`, `CONSUMER_GROUP_ID` | topics and consumer group of the Python consumer |
@@ -326,7 +326,8 @@ registration still succeeds and the publisher ensures the topic before the first
 
 ### Observability
 
-Prometheus scrapes `/actuator/prometheus`. Custom metrics use low-cardinality labels only:
+Prometheus scrapes `/actuator/prometheus` on the management port (`MANAGEMENT_PORT`, default 8081), which is not
+served on the API port and must not be exposed publicly. Alert rules are in `infra/prometheus/alerts.yml`. Custom metrics use low-cardinality labels only:
 
 | Metric | Labels |
 |---|---|
