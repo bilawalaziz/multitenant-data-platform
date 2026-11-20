@@ -97,6 +97,18 @@ class OpenApiContractParserTest {
                     get:
                       responses: {}
                 """;
+        String postOnOtherPath =
+                """
+                openapi: 3.0.3
+                info: {title: T, version: '1'}
+                paths:
+                  /other:
+                    post:
+                      requestBody:
+                        content:
+                          application/json:
+                            schema: {type: object}
+                """;
         String noJsonBody =
                 """
                 openapi: 3.0.3
@@ -127,6 +139,7 @@ class OpenApiContractParserTest {
                         "dangling ref",
                         VALID_YAML.replace("#/components/schemas/Reading", "#/components/schemas/Missing")),
                 Arguments.of("no POST operation", noOperation),
+                Arguments.of("POST on another path", postOnOtherPath),
                 Arguments.of("no json body", noJsonBody),
                 Arguments.of("missing info", "openapi: 3.0.3\npaths: {}\n"),
                 Arguments.of("missing paths", "openapi: 3.0.3\ninfo: {title: T, version: '1'}\n"),

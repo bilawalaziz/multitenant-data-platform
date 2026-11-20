@@ -75,7 +75,11 @@ class SchemaValidationServiceTest {
                 """;
         return Stream.of(
                 Arguments.of("{\"deviceId\":\"MACHINE-001\"}", "temperature", "Missing required field"),
+                Arguments.of("{\"deviceId\":\"MACHINE-001\"}", "unit", "Missing required field"),
+                Arguments.of("{\"deviceId\":\"MACHINE-001\"}", "recordedAt", "Missing required field"),
                 Arguments.of(VALID.replace("21.5", "\"hot\""), "temperature", "Expected numeric value"),
+                Arguments.of(VALID.replace("}\n", ",\"count\":1.5}\n"), "count", "Expected integer value"),
+                Arguments.of(VALID.replace("}\n", ",\"active\":\"yes\"}\n"), "active", "Expected boolean value"),
                 Arguments.of(VALID.replace("\"MACHINE-001\"", "12"), "deviceId", "Expected string value"),
                 Arguments.of(VALID.replace("21.5", "501"), "temperature", "500"),
                 Arguments.of(VALID.replace("21.5", "-51"), "temperature", "-50"),

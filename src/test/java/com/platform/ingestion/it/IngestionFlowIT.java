@@ -224,9 +224,11 @@ class IngestionFlowIT extends AbstractIntegrationTest {
 
     @Test
     void malformedAndMissingHeaderRequests() throws Exception {
-        ingest(tenantIngest(ALPHA), uniqueKey(), "{ not json")
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.errorCode").value("MALFORMED_REQUEST"));
+        for (String body : new String[] {"{ not json", "{\"a\":1} trailing", ""}) {
+            ingest(tenantIngest(ALPHA), uniqueKey(), body)
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.errorCode").value("MALFORMED_REQUEST"));
+        }
         mvc.perform(post("/api/v1/ingestion/readings")
                         .header("Authorization", bearer(tenantIngest(ALPHA)))
                         .contentType(MediaType.APPLICATION_JSON)

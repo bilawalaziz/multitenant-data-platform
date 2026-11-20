@@ -55,6 +55,7 @@ class IdempotencyServiceTest {
                     assertThat(e.errorCode()).isEqualTo(ErrorCode.MALFORMED_REQUEST);
                     assertThat(e.getMessage()).isEqualTo("Numeric values must be finite");
                 });
+        assertThatThrownBy(() -> service.hash(json("[1,-1e999]"))).isInstanceOf(ApiException.class);
     }
 
     @Test
