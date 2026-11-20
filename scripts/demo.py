@@ -8,8 +8,9 @@ Usage:
     python scripts/demo.py list
 
 Configuration (environment variables or a .env file in the project root):
-    APP_URL (http://localhost:8080)  MANAGEMENT_URL (http://localhost:8081)  KEYCLOAK_URL (http://localhost:8180)  PROMETHEUS_URL (http://localhost:9090)
-    GRAFANA_URL (http://localhost:3000)  DEMO_USER_PASSWORD  ALPHA_INGEST_CLIENT_SECRET  BETA_INGEST_CLIENT_SECRET
+    APP_URL (http://localhost:8080)  MANAGEMENT_URL (http://localhost:8081)  KEYCLOAK_URL (http://localhost:8180)
+    PROMETHEUS_URL (http://localhost:9090)  GRAFANA_URL (http://localhost:3000)
+    DEMO_USER_PASSWORD  ALPHA_INGEST_CLIENT_SECRET  BETA_INGEST_CLIENT_SECRET
     DEMO_FORCE_UPLOAD=1 uploads a new contract version even if an active one exists.
 
 Every ingestion uses a fresh uuid-based Idempotency-Key, so the demo is re-runnable. Exit code is non-zero if any
