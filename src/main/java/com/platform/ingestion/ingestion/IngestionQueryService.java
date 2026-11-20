@@ -12,7 +12,6 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-/** Read side of ingestion records. Every query is filtered by the tenant resolved from the path. */
 @Service
 public class IngestionQueryService {
 

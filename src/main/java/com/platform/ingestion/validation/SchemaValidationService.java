@@ -16,11 +16,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import org.springframework.stereotype.Service;
 
-/**
- * Validates payloads against the contract request schema using the OpenAPI 3.0 schema dialect.
- * Compiled schemas are cached per (tenantId, contractId, version); versions are immutable so entries
- * never go stale. The cache is bounded and simply cleared when full.
- */
+/** Compiled schemas are cached per (tenant, contract, version); versions are immutable so entries never go stale. */
 @Service
 public class SchemaValidationService {
 
@@ -56,7 +52,6 @@ public class SchemaValidationService {
         return ValidationMessageMapper.map(schema.validate(payload));
     }
 
-    /** Uncached validation, used for ad-hoc checks and tests. */
     public List<FieldError> validate(JsonNode schemaDocument, JsonNode payload) {
         return ValidationMessageMapper.map(compile(schemaDocument).validate(payload));
     }

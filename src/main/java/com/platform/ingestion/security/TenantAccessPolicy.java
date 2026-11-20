@@ -6,11 +6,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.stereotype.Component;
 
-/**
- * Authorises access to {@code /api/v1/tenants/{tenantId}/**}. Role checks (what an endpoint is for) are in the
- * security filter chain; this policy decides <em>which tenant</em>: platform admins may address any tenant,
- * tenant roles only the tenant named in their token.
- */
+/** Decides which tenant a caller may address: platform admins any tenant, tenant roles only their own. */
 @Component
 public class TenantAccessPolicy {
 

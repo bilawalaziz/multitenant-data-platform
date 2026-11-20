@@ -25,10 +25,6 @@ import java.util.regex.Pattern;
 import org.springframework.stereotype.Component;
 import org.yaml.snakeyaml.LoaderOptions;
 
-/**
- * Parses an uploaded OpenAPI 3.0.3 document (JSON or YAML), enforces the structural rules of the contract
- * registry and extracts the self-contained request schema of {@code POST <ingestionPath>}.
- */
 @Component
 public class OpenApiContractParser {
 

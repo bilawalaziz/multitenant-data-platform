@@ -14,13 +14,9 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
- * Purges old rows so storage stays bounded. Each table is deleted in batches of {@code batch-size}, every batch in
- * its own short transaction, at most {@code max-batches-per-run} batches per table and run. Candidate rows are
- * locked with SKIP LOCKED, so several instances can run it at the same time without waiting on each other.
- *
- * <p>Only PUBLISHED outbox rows are deleted: PENDING and FAILED rows still need delivery or an operator. Ingestion
- * records still referenced by an idempotency row are kept (the foreign key would reject the delete anyway). After
- * its idempotency row is gone, a request that reuses the key is processed as a new ingestion.
+ * Purges old rows in short per-batch transactions, locking candidates with SKIP LOCKED so instances can run it
+ * concurrently. Only PUBLISHED outbox rows are deleted. Ingestion records still referenced by an idempotency row
+ * are kept.
  */
 @Component
 @ConditionalOnProperty(prefix = "platform.retention", name = "enabled", havingValue = "true", matchIfMissing = true)

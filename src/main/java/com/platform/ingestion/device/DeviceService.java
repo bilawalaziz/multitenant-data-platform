@@ -42,7 +42,6 @@ public class DeviceService {
                 .toList();
     }
 
-    /** Used by the ingestion pipeline: the canonical device must be a registered ACTIVE device of the tenant. */
     @Transactional(readOnly = true)
     public void requireActiveDevice(UUID tenantId, String deviceId) {
         boolean active = devices.findByTenantIdAndDeviceId(tenantId, deviceId)

@@ -9,7 +9,6 @@ import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.stereotype.Component;
 
-/** 401 with the standard error body. */
 @Component
 public class RestAuthenticationEntryPoint implements AuthenticationEntryPoint {
 

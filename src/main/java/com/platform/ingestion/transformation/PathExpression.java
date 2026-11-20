@@ -5,10 +5,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Pattern;
 
-/**
- * Minimal path syntax: {@code $.a.b[0].c}. Field names are {@code [A-Za-z0-9_-]+}; array indexes are
- * non-negative integers. No wildcards, filters or recursion: deliberately smaller than JsonPath.
- */
+/** Minimal path syntax, {@code $.a.b[0].c}: no wildcards, filters or recursion. */
 public final class PathExpression {
 
     public sealed interface Segment permits Field, Index {}
@@ -27,7 +24,6 @@ public final class PathExpression {
         this.segments = List.copyOf(segments);
     }
 
-    /** @throws IllegalArgumentException with a human readable reason when the syntax is invalid. */
     public static PathExpression parse(String path) {
         if (path == null || path.isEmpty() || path.charAt(0) != '$') {
             throw new IllegalArgumentException("path must start with '$'");
@@ -72,7 +68,6 @@ public final class PathExpression {
         return segments;
     }
 
-    /** Returns the selected node, or {@code null} when any step is missing. */
     public JsonNode evaluate(JsonNode root) {
         JsonNode current = root;
         for (Segment segment : segments) {

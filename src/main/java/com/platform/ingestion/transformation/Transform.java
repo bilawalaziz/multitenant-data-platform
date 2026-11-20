@@ -16,7 +16,6 @@ import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
-/** The fixed set of value transforms a mapping may use. */
 public enum Transform {
     TRIM("trim", v -> TextNode.valueOf(requireText(v).trim())),
     LOWERCASE("lowercase", v -> TextNode.valueOf(requireText(v).toLowerCase(Locale.ROOT))),
@@ -56,7 +55,6 @@ public enum Transform {
         return BY_NAME.keySet();
     }
 
-    /** @throws TransformFailure when the value cannot be transformed. */
     public JsonNode apply(JsonNode value) {
         try {
             return function.apply(value);
@@ -67,7 +65,6 @@ public enum Transform {
         }
     }
 
-    /** Raised for data problems (not mapping problems). */
     public static final class TransformFailure extends RuntimeException {
         public TransformFailure(String message) {
             super(message);

@@ -40,10 +40,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.security.core.Authentication;
 import org.springframework.stereotype.Service;
 
-/**
- * Runs the ingestion pipeline: resolve tenant, check for an idempotent replay, load the active contract,
- * validate, transform, check the device, then write everything in one transaction.
- */
 @Service
 public class IngestionService {
 

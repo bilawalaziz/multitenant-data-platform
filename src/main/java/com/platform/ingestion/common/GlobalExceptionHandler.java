@@ -21,7 +21,6 @@ import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
-/** Maps every failure to the standard error body. Stack traces and internals are never exposed. */
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 

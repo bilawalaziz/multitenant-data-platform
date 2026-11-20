@@ -9,7 +9,6 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.web.access.AccessDeniedHandler;
 import org.springframework.stereotype.Component;
 
-/** 403 with the standard error body. */
 @Component
 public class RestAccessDeniedHandler implements AccessDeniedHandler {
 

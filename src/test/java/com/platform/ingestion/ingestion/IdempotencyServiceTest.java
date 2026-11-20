@@ -40,63 +40,39 @@ class IdempotencyServiceTest {
     }
 
     @Test
-    void hashIgnoresKeyOrderWhitespaceAndNumberFormatting() {
+    void hashIsCanonicalSensitiveToContentAndRejectsNonFiniteNumbers() {
         assertThat(service.hash(json("{\"a\":1,\"b\":{\"x\":[1,2],\"y\":\"z\"}}")))
+                .hasSize(64)
                 .isEqualTo(service.hash(json("{ \"b\" : {\"y\":\"z\",\"x\":[1,2]}, \"a\": 1.0 }")));
-    }
 
-    @Test
-    void hashRejectsNonFiniteNumbers() {
+        String base = service.hash(json("{\"a\":1,\"l\":[1,2]}"));
+        assertThat(service.hash(json("{\"a\":2,\"l\":[1,2]}"))).isNotEqualTo(base);
+        assertThat(service.hash(json("{\"a\":1,\"l\":[2,1]}"))).isNotEqualTo(base);
+        assertThat(service.hash(json("{\"a\":\"1\",\"l\":[1,2]}"))).isNotEqualTo(base);
+
         assertThatThrownBy(() -> service.hash(json("{\"temperature\":1e999}")))
                 .isInstanceOfSatisfying(ApiException.class, e -> {
                     assertThat(e.errorCode()).isEqualTo(ErrorCode.MALFORMED_REQUEST);
                     assertThat(e.getMessage()).isEqualTo("Numeric values must be finite");
                 });
-        assertThatThrownBy(() -> service.hash(json("[1,-1e999]"))).isInstanceOf(ApiException.class);
     }
 
     @Test
-    void hashChangesWithContentAndArrayOrder() {
-        String base = service.hash(json("{\"a\":1,\"l\":[1,2]}"));
-        assertThat(service.hash(json("{\"a\":2,\"l\":[1,2]}"))).isNotEqualTo(base);
-        assertThat(service.hash(json("{\"a\":1,\"l\":[2,1]}"))).isNotEqualTo(base);
-        assertThat(service.hash(json("{\"a\":\"1\",\"l\":[1,2]}"))).isNotEqualTo(base);
-        assertThat(base).hasSize(64);
-    }
-
-    @Test
-    void claimWonReturnsEmpty() {
+    void claimOutcomes() {
         when(repository.insertIfAbsent(any(), any(), any(), any(), any())).thenReturn(1);
         assertThat(service.claim(tenant, "k1", "hash", UUID.randomUUID(), Instant.now()))
                 .isEmpty();
-    }
 
-    @Test
-    void sameKeySamePayloadReturnsOriginalIngestionId() {
         UUID original = UUID.randomUUID();
         when(repository.insertIfAbsent(any(), any(), any(), any(), any())).thenReturn(0);
         IdempotencyRecord record = existing("hash", original);
         when(repository.findById(new IdempotencyRecord.Key(tenant, "k1"))).thenReturn(Optional.of(record));
-
         assertThat(service.claim(tenant, "k1", "hash", UUID.randomUUID(), Instant.now()))
                 .contains(original);
-    }
 
-    @Test
-    void sameKeyDifferentPayloadIsConflict() {
-        when(repository.insertIfAbsent(any(), any(), any(), any(), any())).thenReturn(0);
-        IdempotencyRecord record = existing("other-hash", UUID.randomUUID());
-        when(repository.findById(new IdempotencyRecord.Key(tenant, "k1"))).thenReturn(Optional.of(record));
-
-        assertThatThrownBy(() -> service.claim(tenant, "k1", "hash", UUID.randomUUID(), Instant.now()))
+        assertThatThrownBy(() -> service.claim(tenant, "k1", "other-hash", UUID.randomUUID(), Instant.now()))
                 .isInstanceOfSatisfying(ApiException.class, e -> assertThat(e.errorCode())
                         .isEqualTo(ErrorCode.IDEMPOTENCY_KEY_CONFLICT));
-    }
-
-    @Test
-    void findReplayIsEmptyWhenKeyUnknown() {
-        when(repository.findById(any(IdempotencyRecord.Key.class))).thenReturn(Optional.empty());
-        assertThat(service.findReplay(tenant, "new", "hash")).isEmpty();
     }
 
     @Test

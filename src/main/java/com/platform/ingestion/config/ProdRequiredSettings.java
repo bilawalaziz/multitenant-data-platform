@@ -7,9 +7,8 @@ import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.Profiles;
 
 /**
- * With the prod profile the connection settings have no defaults. Spring Boot leaves an unresolved ${VAR} in a bound
- * property as literal text (the app would then try to log in as "${DB_USER}"), so resolve them strictly at startup
- * and fail naming the missing variable.
+ * Spring Boot leaves an unresolved ${VAR} as literal text, so with the prod profile resolve connection settings
+ * strictly at startup and fail naming the missing variable.
  */
 public class ProdRequiredSettings implements EnvironmentPostProcessor {
 

@@ -11,7 +11,11 @@ import com.platform.ingestion.common.ErrorCode;
 import com.platform.ingestion.contract.OpenApiContractParser;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 class MappingValidatorTest {
 
@@ -56,46 +60,42 @@ class MappingValidatorTest {
                 .doesNotThrowAnyException();
     }
 
-    @Test
-    void rejectsUnknownTarget() {
-        assertInvalid(MAPPING.formatted(",\"color\":\"$.d\""), "color");
-        assertInvalid(MAPPING.formatted(",\"metadata.bad name\":\"$.d\""), "metadata.bad name");
+    static Stream<Arguments> invalidMappings() {
+        String base = MAPPING.formatted("");
+        return Stream.of(
+                Arguments.of("unknown target", MAPPING.formatted(",\"color\":\"$.d\""), "color"),
+                Arguments.of(
+                        "bad metadata name", MAPPING.formatted(",\"metadata.bad name\":\"$.d\""), "metadata.bad name"),
+                Arguments.of(
+                        "unknown transform",
+                        base.replace("\"$.v\"", "{\"path\":\"$.v\",\"transforms\":[\"rot13\"]}"),
+                        "value"),
+                Arguments.of(
+                        "missing required target",
+                        "{\"device_id\":\"$.d\",\"sensor_id\":\"$.s\",\"value\":\"$.v\",\"unit\":\"$.u\"}",
+                        "event_timestamp"),
+                Arguments.of("path not in schema", base.replace("$.v", "$.temperature"), "value"),
+                Arguments.of(
+                        "nested path not in schema", MAPPING.formatted(",\"metadata.x\":\"$.loc.nope\""), "metadata.x"),
+                Arguments.of("path without root", base.replace("$.v", "v"), "value"),
+                Arguments.of("recursive descent", base.replace("$.v", "$..v"), "value"),
+                Arguments.of("non-numeric index", base.replace("$.v", "$.tags[x]"), "value"),
+                Arguments.of("unclosed index", base.replace("$.v", "$.a[0"), "value"),
+                Arguments.of(
+                        "unknown entry property",
+                        base.replace("\"$.v\"", "{\"path\":\"$.v\",\"script\":\"x\"}"),
+                        "value"));
     }
 
-    @Test
-    void rejectsUnknownTransform() {
-        assertInvalid(
-                MAPPING.formatted("").replace("\"$.v\"", "{\"path\":\"$.v\",\"transforms\":[\"rot13\"]}"), "value");
-    }
-
-    @Test
-    void rejectsMissingRequiredTarget() {
-        assertInvalid(
-                "{\"device_id\":\"$.d\",\"sensor_id\":\"$.s\",\"value\":\"$.v\",\"unit\":\"$.u\"}", "event_timestamp");
-    }
-
-    @Test
-    void rejectsPathNotInSchema() {
-        assertInvalid(MAPPING.formatted("").replace("$.v", "$.temperature"), "value");
-        assertInvalid(MAPPING.formatted(",\"metadata.x\":\"$.loc.nope\""), "metadata.x");
-    }
-
-    @Test
-    void rejectsBadPathSyntax() {
-        assertInvalid(MAPPING.formatted("").replace("$.v", "v"), "value");
-        assertInvalid(MAPPING.formatted("").replace("$.v", "$..v"), "value");
-        assertInvalid(MAPPING.formatted("").replace("$.v", "$.tags[x]"), "value");
-        assertInvalid(MAPPING.formatted("").replace("$.v", "$.a[0"), "value");
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("invalidMappings")
+    void rejectsInvalidMappings(String name, String mapping, String expectedField) {
+        assertInvalid(mapping, expectedField);
     }
 
     @Test
     void rejectsNonObjectMapping() {
         assertThatThrownBy(() -> validator.parse(json("[1]"))).isInstanceOf(ApiException.class);
-    }
-
-    @Test
-    void rejectsUnknownEntryProperty() {
-        assertInvalid(MAPPING.formatted("").replace("\"$.v\"", "{\"path\":\"$.v\",\"script\":\"x\"}"), "value");
     }
 
     @Test

@@ -3,7 +3,6 @@ package com.platform.ingestion.common;
 import java.util.List;
 import org.springframework.http.HttpStatus;
 
-/** Business exception translated to the standard error body by {@link GlobalExceptionHandler}. */
 public class ApiException extends RuntimeException {
 
     private final ErrorCode errorCode;

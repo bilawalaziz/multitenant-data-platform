@@ -14,10 +14,7 @@ import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-/**
- * The single database transaction of an ingestion: idempotency claim + ingestion record + outbox row.
- * The HTTP 202 is only produced after this method returned, i.e. after the commit.
- */
+/** One transaction: idempotency claim, ingestion record and outbox row. 202 is only returned after the commit. */
 @Service
 public class IngestionWriter {
 
@@ -74,7 +71,6 @@ public class IngestionWriter {
         return new WriteOutcome(false, r.ingestionId());
     }
 
-    /** Rebuilds the response of an earlier ingestion (idempotent replay). Tenant-filtered. */
     @Transactional(readOnly = true)
     public IngestionResponse replayResponse(UUID tenantId, UUID ingestionId) {
         IngestionRecord record = records.findByIdAndTenantId(ingestionId, tenantId)

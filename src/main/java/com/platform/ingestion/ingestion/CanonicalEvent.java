@@ -8,7 +8,6 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 
-/** Builds the canonical event (snake_case JSON) as published to Kafka. */
 public final class CanonicalEvent {
 
     public static final String SCHEMA_VERSION = "1.0";

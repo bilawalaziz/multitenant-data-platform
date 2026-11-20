@@ -204,7 +204,7 @@ class IngestionFlowIT extends AbstractIntegrationTest {
     }
 
     @Test
-    void unknownDeviceIsRejected() throws Exception {
+    void unknownDeviceAndMissingContractAreUnprocessable() throws Exception {
         ingest(tenantIngest(ALPHA), uniqueKey(), demoPayload("alpha-unknown-device.json"))
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.errorCode").value("DEVICE_NOT_REGISTERED"));
@@ -212,6 +212,14 @@ class IngestionFlowIT extends AbstractIntegrationTest {
         ingest(tenantIngest(ALPHA), uniqueKey(), demoPayload("alpha-valid.json").replace("MACHINE-001", "MACHINE-002"))
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.errorCode").value("DEVICE_NOT_REGISTERED"));
+
+        registerTenant("tenant-empty");
+        ingest(tenantIngest("tenant-empty"), uniqueKey(), demoPayload("alpha-valid.json"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.errorCode").value("NO_ACTIVE_CONTRACT"));
+        ingest(tenantIngest("tenant-ghost"), uniqueKey(), demoPayload("alpha-valid.json"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.errorCode").value("TENANT_NOT_REGISTERED"));
     }
 
     @Test
@@ -239,18 +247,7 @@ class IngestionFlowIT extends AbstractIntegrationTest {
     }
 
     @Test
-    void tenantWithoutActiveContractCannotIngest() throws Exception {
-        registerTenant("tenant-empty");
-        ingest(tenantIngest("tenant-empty"), uniqueKey(), demoPayload("alpha-valid.json"))
-                .andExpect(status().isUnprocessableEntity())
-                .andExpect(jsonPath("$.errorCode").value("NO_ACTIVE_CONTRACT"));
-        ingest(tenantIngest("tenant-ghost"), uniqueKey(), demoPayload("alpha-valid.json"))
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.errorCode").value("TENANT_NOT_REGISTERED"));
-    }
-
-    @Test
-    void duplicateIdempotencyKeyWithSamePayloadReturnsOriginal() throws Exception {
+    void idempotencyKeyReplayConflictAndTenantScope() throws Exception {
         String key = uniqueKey();
         String payload = demoPayload("alpha-valid.json");
         JsonNode first = body(ingest(tenantIngest(ALPHA), key, payload)
@@ -280,27 +277,22 @@ class IngestionFlowIT extends AbstractIntegrationTest {
                         Integer.class,
                         first.get("eventId").asText()))
                 .isEqualTo(1);
-    }
 
-    @Test
-    void duplicateIdempotencyKeyWithDifferentPayloadIsConflict() throws Exception {
-        String key = uniqueKey();
-        ingest(tenantIngest(ALPHA), key, demoPayload("alpha-valid.json")).andExpect(status().isAccepted());
-        ingest(tenantIngest(ALPHA), key, demoPayload("alpha-valid.json").replace("92.5", "93.5"))
+        String conflictKey = uniqueKey();
+        ingest(tenantIngest(ALPHA), conflictKey, demoPayload("alpha-valid.json"))
+                .andExpect(status().isAccepted());
+        ingest(tenantIngest(ALPHA), conflictKey, demoPayload("alpha-valid.json").replace("92.5", "93.5"))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.errorCode").value("IDEMPOTENCY_KEY_CONFLICT"));
         assertThat(jdbc.queryForObject(
                         "SELECT count(*) FROM platform.ingestion_records WHERE idempotency_key = ?",
                         Integer.class,
-                        key))
+                        conflictKey))
                 .isEqualTo(1);
-    }
 
-    @Test
-    void sameKeyInDifferentTenantsIsIndependent() throws Exception {
-        String key = uniqueKey();
-        ingest(tenantIngest(ALPHA), key, demoPayload("alpha-valid.json")).andExpect(status().isAccepted());
-        ingest(tenantIngest(BETA), key, demoPayload("beta-valid.json")).andExpect(status().isAccepted());
+        String sharedKey = uniqueKey();
+        ingest(tenantIngest(ALPHA), sharedKey, demoPayload("alpha-valid.json")).andExpect(status().isAccepted());
+        ingest(tenantIngest(BETA), sharedKey, demoPayload("beta-valid.json")).andExpect(status().isAccepted());
     }
 
     @Test
@@ -391,7 +383,7 @@ class IngestionFlowIT extends AbstractIntegrationTest {
     }
 
     @Test
-    void unauthenticatedAndInvalidTokensGetErrorBody() throws Exception {
+    void unauthenticatedAndBadRequestsGetTheStandardErrorBody() throws Exception {
         mvc.perform(post("/api/v1/ingestion/readings")
                         .header("Idempotency-Key", uniqueKey())
                         .contentType(MediaType.APPLICATION_JSON)
@@ -405,10 +397,7 @@ class IngestionFlowIT extends AbstractIntegrationTest {
                 .andExpect(jsonPath("$.errorCode").value("UNAUTHENTICATED"));
         mvc.perform(get("/api/v1/admin/tenants")).andExpect(status().isUnauthorized());
         mvc.perform(get("/actuator/env")).andExpect(status().isUnauthorized());
-    }
 
-    @Test
-    void unknownEndpointsAndErrorsDoNotLeakInternals() throws Exception {
         getAs(PLATFORM_ADMIN, "/api/v1/does-not-exist")
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.errorCode").value("RESOURCE_NOT_FOUND"));
@@ -425,7 +414,7 @@ class IngestionFlowIT extends AbstractIntegrationTest {
     }
 
     @Test
-    void outboxRetriesAfterFailureAndRecovers() throws Exception {
+    void outboxRetriesAfterFailureRecoversAndFailsAfterMaxAttempts() throws Exception {
         drainOutbox();
         toggling.setFailing(true);
         try {
@@ -452,6 +441,19 @@ class IngestionFlowIT extends AbstractIntegrationTest {
                             eventId))
                     .isEqualTo("PUBLISHED");
             assertThat(recordFor("tenant-alpha.readings", eventId).key()).isEqualTo("MACHINE-001");
+
+            // after the maximum number of attempts the row is FAILED instead of backing off again
+            toggling.setFailing(true);
+            String exhaustedId = accepted(tenantIngest(ALPHA), demoPayload("alpha-valid.json"))
+                    .get("eventId")
+                    .asText();
+            jdbc.update("UPDATE platform.outbox_events SET attempts = 49 WHERE event_id = ?::uuid", exhaustedId);
+            outboxPublisher.publishDue();
+            assertThat(jdbc.queryForObject(
+                            "SELECT status FROM platform.outbox_events WHERE event_id = ?::uuid",
+                            String.class,
+                            exhaustedId))
+                    .isEqualTo("FAILED");
         } finally {
             toggling.setFailing(false);
         }
@@ -496,26 +498,6 @@ class IngestionFlowIT extends AbstractIntegrationTest {
         mvc.perform(post("/api/v1/admin/outbox/" + UUID.randomUUID() + "/requeue")
                         .header("Authorization", bearer(PLATFORM_ADMIN)))
                 .andExpect(status().isNotFound());
-    }
-
-    @Test
-    void exhaustedAttemptsMoveRowToFailed() throws Exception {
-        drainOutbox();
-        toggling.setFailing(true);
-        try {
-            String eventId = accepted(tenantIngest(ALPHA), demoPayload("alpha-valid.json"))
-                    .get("eventId")
-                    .asText();
-            jdbc.update("UPDATE platform.outbox_events SET attempts = 49 WHERE event_id = ?::uuid", eventId);
-            outboxPublisher.publishDue();
-            assertThat(jdbc.queryForObject(
-                            "SELECT status FROM platform.outbox_events WHERE event_id = ?::uuid",
-                            String.class,
-                            eventId))
-                    .isEqualTo("FAILED");
-        } finally {
-            toggling.setFailing(false);
-        }
     }
 
     @Test
