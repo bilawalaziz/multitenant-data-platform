@@ -6,10 +6,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.platform.ingestion.device.Device;
 import com.platform.ingestion.device.DeviceRepository;
 import com.platform.ingestion.device.DeviceStatus;
+import com.platform.ingestion.observability.OutboxGaugeRefresher;
 import com.platform.ingestion.persistence.TenantScopedDataSource;
 import com.platform.ingestion.tenant.TenantScope;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
@@ -29,6 +31,12 @@ class RowLevelSecurityIT extends AbstractIntegrationTest {
 
     @Autowired
     private DeviceRepository devices;
+
+    @Autowired
+    private OutboxGaugeRefresher gaugeRefresher;
+
+    @Autowired
+    private MeterRegistry meterRegistry;
 
     private UUID tenantA;
     private UUID tenantB;
@@ -174,6 +182,20 @@ class RowLevelSecurityIT extends AbstractIntegrationTest {
                 assertThat(single.queryForObject(visible, String.class)).isEqualTo("RLS-A");
             }
         }
+    }
+
+    /** The refresher swallows errors, so a missing system scope would silently report zero to the backlog alert. */
+    @Test
+    void outboxGaugesCountPendingRowsOfEveryTenant() throws Exception {
+        newOutboxRow(TENANT_A, "RLS-A", Instant.now());
+        newOutboxRow(TENANT_B, "RLS-B", Instant.now());
+
+        gaugeRefresher.refresh();
+
+        Integer pending = jdbc.queryForObject(
+                "SELECT count(*) FROM platform.outbox_events WHERE status = 'PENDING'", Integer.class);
+        assertThat(pending).isGreaterThanOrEqualTo(2);
+        assertThat(meterRegistry.get("outbox.pending.events").gauge().value()).isEqualTo(pending.doubleValue());
     }
 
     private static int count(JdbcTemplate template, String table) {
