@@ -16,6 +16,7 @@ import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -65,7 +66,7 @@ public class KeycloakDeviceCredentialProvisioner implements DeviceCredentialProv
         try {
             String internalId = createClient(clientId, secret, tenantCode, deviceId);
             try {
-                assignIngestRole(internalId);
+                configureServiceAccount(internalId, tenantCode, deviceId);
             } catch (RuntimeException e) {
                 // A client without its role would be a credential that can never ingest; do not leave it behind.
                 deleteQuietly(internalId, clientId);
@@ -159,69 +160,108 @@ public class KeycloakDeviceCredentialProvisioner implements DeviceCredentialProv
         rep.put("directAccessGrantsEnabled", false);
         rep.put("serviceAccountsEnabled", true);
         rep.put("protocol", "openid-connect");
-        // With full scope the token would also carry the service account's default realm roles and account roles;
-        // restricting it to the scope-mapped ingest role (see assignIngestRole) leaves exactly one role.
-        rep.put("fullScopeAllowed", false);
-        ArrayNode mappers = rep.putArray("protocolMappers");
-        mappers.add(hardcodedClaim("tenant_id-hardcoded", "tenant_id", tenantCode));
-        mappers.add(hardcodedClaim("device_id-hardcoded", "device_id", deviceId));
-        ObjectNode audience = mappers.addObject();
-        audience.put("name", "sensor-platform-api-audience");
-        audience.put("protocol", "openid-connect");
-        audience.put("protocolMapper", "oidc-audience-mapper");
-        ObjectNode audienceConfig = audience.putObject("config");
-        audienceConfig.put("included.custom.audience", props.audience());
-        audienceConfig.put("id.token.claim", "false");
-        audienceConfig.put("access.token.claim", "true");
-        audienceConfig.put("introspection.token.claim", "true");
+        // Restricting scope to one role would need a scope mapping, which requires the realm-wide manage-realm
+        // role; instead the service account is left holding only the ingest role (see configureServiceAccount).
+        rep.put("fullScopeAllowed", true);
         return rep;
     }
 
-    private static ObjectNode hardcodedClaim(String name, String claim, String value) {
-        ObjectNode mapper = JSON.createObjectNode();
-        mapper.put("name", name);
-        mapper.put("protocol", "openid-connect");
-        mapper.put("protocolMapper", "oidc-hardcoded-claim-mapper");
-        ObjectNode config = mapper.putObject("config");
-        config.put("claim.name", claim);
-        config.put("claim.value", value);
-        config.put("jsonType.label", "String");
-        config.put("access.token.claim", "true");
-        config.put("id.token.claim", "false");
-        config.put("introspection.token.claim", "true");
-        config.put("userinfo.token.claim", "false");
-        return mapper;
-    }
-
-    private void assignIngestRole(String internalId) {
+    /**
+     * Claims come from attributes of the service-account user through a shared client scope, because creating
+     * per-client protocol mappers would need the realm-wide manage-realm role. The attributes are admin-only in the
+     * realm's user profile, so the device cannot edit them itself.
+     */
+    private void configureServiceAccount(String internalId, String tenantCode, String deviceId) {
         JsonNode user = authorised(token -> http.get()
                 .uri(props.adminBase() + "/clients/" + internalId + "/service-account-user")
                 .header(HttpHeaders.AUTHORIZATION, bearer(token))
                 .retrieve()
                 .body(JsonNode.class));
-        JsonNode role = authorised(token -> http.get()
-                .uri(props.adminBase() + "/roles/" + props.ingestRole())
+        String scopeId = findClientScopeId(props.deviceScope());
+        if (user == null) {
+            throw new CredentialProvisioningException(Reason.UNAVAILABLE, "Keycloak returned an empty response");
+        }
+        String userId = user.path("id").asText();
+
+        // The full representation is sent back: a partial one fails user-profile validation.
+        ObjectNode update = ((ObjectNode) user).deepCopy();
+        ObjectNode attributes = update.putObject("attributes");
+        attributes.putArray("tenant_id").add(tenantCode);
+        attributes.putArray("device_id").add(deviceId);
+        authorised(token -> http.put()
+                .uri(props.adminBase() + "/users/" + userId)
+                .header(HttpHeaders.AUTHORIZATION, bearer(token))
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(update)
+                .retrieve()
+                .toBodilessEntity());
+
+        authorised(token -> http.put()
+                .uri(props.adminBase() + "/clients/" + internalId + "/default-client-scopes/" + scopeId)
+                .header(HttpHeaders.AUTHORIZATION, bearer(token))
+                .retrieve()
+                .toBodilessEntity());
+
+        // Roles are looked up through the user's own role-mapping endpoints, which manage-users covers; reading
+        // realm roles directly would need view-realm.
+        JsonNode mapped = authorised(token -> http.get()
+                .uri(props.adminBase() + "/users/" + userId + "/role-mappings/realm")
                 .header(HttpHeaders.AUTHORIZATION, bearer(token))
                 .retrieve()
                 .body(JsonNode.class));
-        if (user == null || role == null) {
-            throw new CredentialProvisioningException(Reason.UNAVAILABLE, "Keycloak returned an empty response");
+        JsonNode available = authorised(token -> http.get()
+                .uri(props.adminBase() + "/users/" + userId + "/role-mappings/realm/available")
+                .header(HttpHeaders.AUTHORIZATION, bearer(token))
+                .retrieve()
+                .body(JsonNode.class));
+        JsonNode ingestRole = null;
+        if (available != null && available.isArray()) {
+            for (JsonNode candidate : available) {
+                if (props.ingestRole().equals(candidate.path("name").asText())) {
+                    ingestRole = candidate;
+                }
+            }
         }
-        ArrayNode roles = JSON.createArrayNode().add(role);
+        if (ingestRole == null) {
+            throw new CredentialProvisioningException(
+                    Reason.UNAVAILABLE, "Realm role " + props.ingestRole() + " is missing or cannot be assigned");
+        }
+        ArrayNode ingestOnly = JSON.createArrayNode().add(ingestRole);
         authorised(token -> http.post()
-                .uri(props.adminBase() + "/clients/" + internalId + "/scope-mappings/realm")
+                .uri(props.adminBase() + "/users/" + userId + "/role-mappings/realm")
                 .header(HttpHeaders.AUTHORIZATION, bearer(token))
                 .contentType(MediaType.APPLICATION_JSON)
-                .body(roles)
+                .body(ingestOnly)
                 .retrieve()
                 .toBodilessEntity());
-        authorised(token -> http.post()
-                .uri(props.adminBase() + "/users/" + user.path("id").asText() + "/role-mappings/realm")
+        if (mapped != null && mapped.isArray() && !mapped.isEmpty()) {
+            // Keycloak gives every service account the realm default roles (account access, offline_access).
+            // The device must hold the ingest role only, so they are removed.
+            authorised(token -> http.method(HttpMethod.DELETE)
+                    .uri(props.adminBase() + "/users/" + userId + "/role-mappings/realm")
+                    .header(HttpHeaders.AUTHORIZATION, bearer(token))
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(mapped)
+                    .retrieve()
+                    .toBodilessEntity());
+        }
+    }
+
+    private String findClientScopeId(String name) {
+        JsonNode scopes = authorised(token -> http.get()
+                .uri(props.adminBase() + "/client-scopes")
                 .header(HttpHeaders.AUTHORIZATION, bearer(token))
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(roles)
                 .retrieve()
-                .toBodilessEntity());
+                .body(JsonNode.class));
+        if (scopes != null && scopes.isArray()) {
+            for (JsonNode scope : scopes) {
+                if (name.equals(scope.path("name").asText())) {
+                    return scope.path("id").asText();
+                }
+            }
+        }
+        throw new CredentialProvisioningException(
+                Reason.UNAVAILABLE, "Client scope " + name + " is missing from the realm");
     }
 
     private Optional<String> findInternalId(String clientId) {

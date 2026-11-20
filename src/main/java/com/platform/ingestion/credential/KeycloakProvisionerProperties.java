@@ -6,7 +6,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 
 /**
  * @param url base URL of Keycloak as reachable from the application (no realm path)
- * @param audience audience the device tokens must carry
+ * @param deviceScope shared client scope (defined in the realm) that puts tenant, device and the API audience
+ * into a device client's tokens
  */
 @ConfigurationProperties(prefix = "platform.keycloak.provisioner")
 public record KeycloakProvisionerProperties(
@@ -14,7 +15,7 @@ public record KeycloakProvisionerProperties(
         @DefaultValue("sensor-platform") String realm,
         @DefaultValue("sensor-platform-provisioner") String clientId,
         @DefaultValue("") String clientSecret,
-        @DefaultValue("sensor-platform-api") String audience,
+        @DefaultValue("device-identity") String deviceScope,
         @DefaultValue("tenant-ingest") String ingestRole,
         @DefaultValue("2s") Duration connectTimeout,
         @DefaultValue("5s") Duration readTimeout) {

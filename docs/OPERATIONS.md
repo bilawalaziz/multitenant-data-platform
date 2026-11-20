@@ -21,13 +21,17 @@
   users and clients. Production needs Keycloak in production mode (`start`) behind TLS with a fixed hostname, and
   `KEYCLOAK_ISSUER_URI` and `KEYCLOAK_JWK_SET_URI` must point at it.
 - Device credentials: the app authenticates to the Keycloak admin API as client `sensor-platform-provisioner`. Its
-  service account needs the realm-management roles `manage-clients`, `manage-users` and `manage-realm` and the
-  `kc-admin-api` client scope (Keycloak 26.8 requires the admin-API audience on every admin token). Each role was
-  found necessary by removing it: without `manage-clients` client creation is refused, without `manage-users` the
-  ingest role cannot be assigned to the new client's service account, and without `manage-realm` Keycloak refuses
-  clients that carry protocol mappers. The realm export already contains all of it; an existing realm needs the same
-  client added by hand because the import only runs on an empty realm. The client has no API audience and no API
-  role, so its token is useless against the platform API.
+  service account holds the realm-management roles `manage-clients` and `manage-users` and the `kc-admin-api` client
+  scope (Keycloak 26.8 requires the admin-API audience on every admin token); it does not hold `manage-realm`. Each
+  role was found necessary by removing it: without `manage-clients` client creation is refused, without
+  `manage-users` the service account's attributes and roles cannot be set. Device clients get their `tenant_id`,
+  `device_id` and the API audience from the shared client scope `device-identity` (defined in the realm export, not a
+  realm default) through user-attribute mappers on the service account, which avoids per-client protocol mappers and
+  with them `manage-realm`. Those attributes are admin-only in the realm's user profile (unmanaged attributes are
+  `ADMIN_EDIT`), and a device token is not accepted by the account or admin API. The realm export already contains
+  all of it; an existing realm needs the same client and scope added by hand because the import only runs on an
+  empty realm. The provisioner client has no API audience and no API role, so its token is useless against the
+  platform API.
 - Secrets: `DB_PASSWORD`, client secrets, `PROVISIONER_CLIENT_SECRET`, `KEYCLOAK_ADMIN_PASSWORD`, `GRAFANA_ADMIN_PASSWORD` and
   `DEMO_USER_PASSWORD` come from a secret store, not from a committed `.env`. Compose refuses to start when a
   required variable is unset (`:?` syntax in `docker-compose.yml`).

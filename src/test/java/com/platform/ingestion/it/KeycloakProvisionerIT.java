@@ -90,7 +90,7 @@ class KeycloakProvisionerIT {
                 REALM,
                 "sensor-platform-provisioner",
                 secret,
-                "sensor-platform-api",
+                "device-identity",
                 "tenant-ingest",
                 Duration.ofSeconds(2),
                 Duration.ofSeconds(15));
@@ -234,6 +234,45 @@ class KeycloakProvisionerIT {
                 .doesNotContain("platform-admin")
                 .doesNotContain("tenant-admin");
         assertThat(claims.has("tenant_id")).isFalse();
+        // Least privilege: no manage-realm (it would allow realm-wide changes), only what provisioning needs.
+        List<String> realmManagement = new java.util.ArrayList<>();
+        claims.get("resource_access")
+                .get("realm-management")
+                .get("roles")
+                .forEach(r -> realmManagement.add(r.asText()));
+        assertThat(realmManagement).containsExactlyInAnyOrder("manage-clients", "manage-users");
+    }
+
+    @Test
+    void deviceCredentialCannotChangeItsOwnIdentityClaims() throws Exception {
+        String device = uniqueDevice();
+        DeviceCredential credential = provisioner.create("tenant-alpha", device);
+        String token = clientCredentials(credential.clientId(), credential.clientSecret())
+                .body()
+                .get("access_token")
+                .asText();
+        String userId = claims(token).get("sub").asText();
+
+        // Neither the account API nor the admin API accepts the device token (no account or admin audience).
+        for (String url : List.of(
+                baseUrl + "/realms/" + REALM + "/account/", baseUrl + "/admin/realms/" + REALM + "/users/" + userId)) {
+            HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+                    .header("Authorization", "Bearer " + token)
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"attributes\":{\"tenant_id\":[\"tenant-beta\"]}}"))
+                    .build();
+            int status = HttpClient.newHttpClient()
+                    .send(request, HttpResponse.BodyHandlers.ofString())
+                    .statusCode();
+            assertThat(status).isIn(401, 403, 404, 405);
+        }
+        // The claims in a fresh token are unchanged.
+        JsonNode fresh = claims(clientCredentials(credential.clientId(), credential.clientSecret())
+                .body()
+                .get("access_token")
+                .asText());
+        assertThat(fresh.get("tenant_id").asText()).isEqualTo("tenant-alpha");
+        assertThat(fresh.get("device_id").asText()).isEqualTo(device);
     }
 
     @Test
