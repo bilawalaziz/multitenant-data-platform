@@ -19,6 +19,8 @@ public class ProdRequiredSettings implements EnvironmentPostProcessor {
             "spring.flyway.user",
             "spring.flyway.password",
             "spring.kafka.bootstrap-servers",
+            "spring.data.redis.host",
+            "spring.data.redis.password",
             "spring.security.oauth2.resourceserver.jwt.issuer-uri",
             "spring.security.oauth2.resourceserver.jwt.jwk-set-uri",
             "platform.keycloak.provisioner.url",

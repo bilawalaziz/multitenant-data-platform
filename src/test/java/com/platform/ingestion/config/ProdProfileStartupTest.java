@@ -22,6 +22,8 @@ class ProdProfileStartupTest {
         REQUIRED.put("DB_MIGRATION_USER", "owner");
         REQUIRED.put("DB_MIGRATION_PASSWORD", "owner-pw");
         REQUIRED.put("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:1");
+        REQUIRED.put("REDIS_HOST", "127.0.0.1");
+        REQUIRED.put("REDIS_PASSWORD", "r");
         REQUIRED.put("KEYCLOAK_ISSUER_URI", "http://127.0.0.1:1/realms/x");
         REQUIRED.put("KEYCLOAK_JWK_SET_URI", "http://127.0.0.1:1/certs");
         REQUIRED.put("KEYCLOAK_ADMIN_URL", "http://127.0.0.1:1");
@@ -38,6 +40,8 @@ class ProdProfileStartupTest {
                 "DB_MIGRATION_USER",
                 "DB_MIGRATION_PASSWORD",
                 "KAFKA_BOOTSTRAP_SERVERS",
+                "REDIS_HOST",
+                "REDIS_PASSWORD",
                 "KEYCLOAK_ISSUER_URI",
                 "KEYCLOAK_JWK_SET_URI",
                 "KEYCLOAK_ADMIN_URL",

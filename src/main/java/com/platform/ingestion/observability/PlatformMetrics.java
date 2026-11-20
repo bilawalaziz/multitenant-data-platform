@@ -19,6 +19,7 @@ public class PlatformMetrics {
     private final Counter duplicate;
     private final Counter rejected;
     private final Counter validationFailures;
+    private final Counter rateLimitErrors;
     private final Counter publishSuccess;
     private final Counter publishFailure;
     private final Map<String, Counter> retentionDeleted;
@@ -42,6 +43,9 @@ public class PlatformMetrics {
                 .register(registry);
         this.validationFailures = Counter.builder("ingestion.validation.failures")
                 .description("Payloads that failed contract validation")
+                .register(registry);
+        this.rateLimitErrors = Counter.builder("ratelimit.errors")
+                .description("Rate limit checks skipped because the limiter store failed (requests fail open)")
                 .register(registry);
         this.publishSuccess = Counter.builder("outbox.publish")
                 .tag("result", "success")
@@ -91,6 +95,10 @@ public class PlatformMetrics {
                 .description("Rejected ingestion requests by error code")
                 .register(registry)
                 .increment();
+    }
+
+    public void rateLimitError() {
+        rateLimitErrors.increment();
     }
 
     public void validationFailed() {

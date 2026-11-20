@@ -49,6 +49,8 @@ import org.testcontainers.utility.DockerImageName;
         properties = {
             "platform.outbox.enabled=false",
             "platform.retention.enabled=false",
+            // Starting Redis for every test class buys nothing; RateLimitIT opts back in.
+            "platform.rate-limit.enabled=false",
             "platform.kafka.admin-timeout-ms=10000"
         })
 @AutoConfigureMockMvc

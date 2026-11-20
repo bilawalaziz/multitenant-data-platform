@@ -18,6 +18,7 @@ import com.platform.ingestion.ingestion.IngestionWriter.WriteOutcome;
 import com.platform.ingestion.ingestion.IngestionWriter.WriteRequest;
 import com.platform.ingestion.observability.MdcKeys;
 import com.platform.ingestion.observability.PlatformMetrics;
+import com.platform.ingestion.ratelimit.RateLimiter;
 import com.platform.ingestion.security.DeviceBindingPolicy;
 import com.platform.ingestion.security.TenantResolver;
 import com.platform.ingestion.tenant.TenantContext;
@@ -55,6 +56,7 @@ public class IngestionService {
     private final DeviceService devices;
     private final DeviceBindingPolicy deviceBinding;
     private final IngestionWriter writer;
+    private final RateLimiter rateLimiter;
     private final PlatformMetrics metrics;
     private final Clock clock;
     private final int maxPayloadBytes;
@@ -70,6 +72,7 @@ public class IngestionService {
             DeviceService devices,
             DeviceBindingPolicy deviceBinding,
             IngestionWriter writer,
+            RateLimiter rateLimiter,
             PlatformMetrics metrics,
             Clock clock,
             ObjectMapper objectMapper,
@@ -82,6 +85,7 @@ public class IngestionService {
         this.devices = devices;
         this.deviceBinding = deviceBinding;
         this.writer = writer;
+        this.rateLimiter = rateLimiter;
         this.metrics = metrics;
         this.clock = clock;
         this.maxPayloadBytes = maxPayloadBytes;
@@ -127,7 +131,13 @@ public class IngestionService {
             Authentication authentication, String tenantHint, String idempotencyKey, byte[] body) {
         TenantContext tenant = tenantResolver.resolve(authentication, tenantHint);
         MDC.put(MdcKeys.TENANT_ID, tenant.code());
+        // Before any database work, so a flooding tenant cannot exhaust the connection pool.
+        rateLimiter.checkTenant(tenant);
         Optional<String> boundDevice = deviceBinding.boundDevice(authentication);
+        // A device credential names its device up front; a tenant-wide one is limited once the payload is mapped.
+        if (boundDevice.isPresent()) {
+            rateLimiter.checkDevice(tenant, boundDevice.get());
+        }
         // Opened before the first tenant-owned query and before the writer's transaction takes its connection.
         try (TenantScope ignored = TenantScope.tenant(tenant.id())) {
             return processInScope(tenant, boundDevice, idempotencyKey, body);
@@ -166,6 +176,9 @@ public class IngestionService {
         }
 
         MappedFields fields = mappingEngine.map(payload, contract.mapping());
+        if (boundDevice.isEmpty()) {
+            rateLimiter.checkDevice(tenant, fields.deviceId());
+        }
         DeviceBindingPolicy.requireSameDevice(boundDevice, fields.deviceId());
         devices.requireActiveDevice(tenant.id(), fields.deviceId());
 
