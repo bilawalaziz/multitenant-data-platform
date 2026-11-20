@@ -1,5 +1,6 @@
 package com.platform.ingestion.ratelimit;
 
+import java.time.Duration;
 import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
@@ -7,16 +8,21 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 /**
  * Token-bucket limits for ingestion. Defaults live in application.yml so that tenant and device can differ.
  *
+ * @param failureCooldown after a Redis failure, limiting is skipped (requests are admitted) for this long
  * @param tenantOverrides per tenant code; an unset field falls back to the tenant default
  */
 @ConfigurationProperties(prefix = "platform.rate-limit")
 public record RateLimitProperties(
         @DefaultValue("true") boolean enabled,
+        @DefaultValue("2s") Duration failureCooldown,
         Limit tenant,
         Limit device,
         Map<String, TenantOverride> tenantOverrides) {
 
     public RateLimitProperties {
+        if (failureCooldown.isNegative() || failureCooldown.isZero()) {
+            throw new IllegalArgumentException("platform.rate-limit.failure-cooldown must be positive");
+        }
         tenantOverrides = tenantOverrides == null ? Map.of() : Map.copyOf(tenantOverrides);
     }
 

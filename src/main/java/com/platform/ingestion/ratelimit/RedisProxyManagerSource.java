@@ -13,6 +13,7 @@ import io.lettuce.core.codec.ByteArrayCodec;
 import io.lettuce.core.codec.RedisCodec;
 import io.lettuce.core.codec.StringCodec;
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
 import org.springframework.stereotype.Component;
@@ -29,18 +30,34 @@ public class RedisProxyManagerSource implements DisposableBean {
     private static final Duration KEEP_AFTER_REFILL = Duration.ofSeconds(30);
 
     private final RedisProperties redis;
-    private RedisClient client;
-    private StatefulRedisConnection<String, byte[]> connection;
-    private ProxyManager<String> proxyManager;
+    private final AtomicBoolean connecting = new AtomicBoolean();
+    private volatile RedisClient client;
+    private volatile StatefulRedisConnection<String, byte[]> connection;
+    private volatile ProxyManager<String> proxyManager;
 
     public RedisProxyManagerSource(RedisProperties redis) {
         this.redis = redis;
     }
 
-    synchronized ProxyManager<String> get() {
-        if (proxyManager != null) {
-            return proxyManager;
+    /**
+     * @return the proxy manager, or null while another thread is connecting; no caller ever waits for a connect
+     */
+    ProxyManager<String> get() {
+        ProxyManager<String> ready = proxyManager;
+        if (ready != null) {
+            return ready;
         }
+        if (!connecting.compareAndSet(false, true)) {
+            return null;
+        }
+        try {
+            return connect();
+        } finally {
+            connecting.set(false);
+        }
+    }
+
+    private ProxyManager<String> connect() {
         Duration timeout = redis.getTimeout() != null ? redis.getTimeout() : Duration.ofMillis(200);
         RedisURI.Builder uri = RedisURI.builder()
                 .withHost(redis.getHost())
@@ -80,12 +97,14 @@ public class RedisProxyManagerSource implements DisposableBean {
     }
 
     @Override
-    public synchronized void destroy() {
-        if (connection != null) {
-            connection.close();
+    public void destroy() {
+        StatefulRedisConnection<String, byte[]> open = connection;
+        if (open != null) {
+            open.close();
         }
-        if (client != null) {
-            client.shutdown(Duration.ZERO, Duration.ofSeconds(1));
+        RedisClient created = client;
+        if (created != null) {
+            created.shutdown(Duration.ZERO, Duration.ofSeconds(1));
         }
     }
 }

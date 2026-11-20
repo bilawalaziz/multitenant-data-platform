@@ -101,6 +101,7 @@ class IngestionServiceTest {
                 clock,
                 new ObjectMapper(),
                 1024);
+        when(tenantResolver.claimedTenantCode(any(), any())).thenReturn("tenant-alpha");
         when(tenantResolver.resolve(any(), any())).thenReturn(tenant);
         when(idempotency.requireValidKey(any())).thenAnswer(i -> i.getArgument(0));
         when(idempotency.hash(any())).thenReturn("hash");
@@ -187,6 +188,36 @@ class IngestionServiceTest {
         assertThatThrownBy(() -> service.ingest(otherDevice, null, "key-1", body("{}")))
                 .isInstanceOfSatisfying(
                         ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.DEVICE_MISMATCH));
+    }
+
+    @Test
+    void tenantLimitIsEnforcedBeforeAnyTenantLookup() {
+        doThrow(new ApiException(ErrorCode.RATE_LIMITED, "limited"))
+                .when(rateLimiter)
+                .checkTenant("tenant-alpha");
+
+        assertThatThrownBy(() -> service.ingest(auth, null, "key-1", body("{}")))
+                .isInstanceOfSatisfying(
+                        ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.RATE_LIMITED));
+
+        verify(tenantResolver, never()).resolve(any(), any());
+        verify(writer, never()).write(any());
+        assertThat(count("ingestion.rejections", "reason", "RATE_LIMITED")).isEqualTo(1);
+    }
+
+    @Test
+    void deviceLimitFromTheTokenIsEnforcedBeforeAnyTenantLookup() {
+        doThrow(new ApiException(ErrorCode.RATE_LIMITED, "limited"))
+                .when(rateLimiter)
+                .checkDevice("tenant-alpha", "MACHINE-001");
+        Authentication deviceToken = new JwtAuthenticationToken(
+                TestJwts.jwt("device-client", "tenant-alpha", "MACHINE-001", List.of("tenant-ingest")));
+
+        assertThatThrownBy(() -> service.ingest(deviceToken, null, "key-1", body("{}")))
+                .isInstanceOfSatisfying(
+                        ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.RATE_LIMITED));
+
+        verify(tenantResolver, never()).resolve(any(), any());
     }
 
     @Test

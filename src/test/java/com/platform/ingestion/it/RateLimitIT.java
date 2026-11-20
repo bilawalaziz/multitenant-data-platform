@@ -11,7 +11,6 @@ import com.platform.ingestion.observability.PlatformMetrics;
 import com.platform.ingestion.ratelimit.RateLimitProperties;
 import com.platform.ingestion.ratelimit.RateLimiter;
 import com.platform.ingestion.ratelimit.RedisProxyManagerSource;
-import com.platform.ingestion.tenant.TenantContext;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -42,6 +41,7 @@ import org.testcontainers.utility.DockerImageName;
 @TestPropertySource(
         properties = {
             "platform.rate-limit.enabled=true",
+            "platform.rate-limit.failure-cooldown=1s",
             "platform.rate-limit.tenant.capacity=6",
             "platform.rate-limit.tenant.refill-per-second=0.05",
             "platform.rate-limit.device.capacity=3",
@@ -76,6 +76,9 @@ class RateLimitIT extends AbstractIntegrationTest {
 
     @Autowired
     private RateLimitProperties limits;
+
+    @Autowired
+    private RateLimiter rateLimiter;
 
     @Autowired
     private PlatformMetrics platformMetrics;
@@ -125,9 +128,26 @@ class RateLimitIT extends AbstractIntegrationTest {
         return counter == null ? 0 : counter.count();
     }
 
-    private double limiterErrors() {
-        var counter = registry.find("ratelimit.errors").counter();
+    /** Lets the circuit breaker close again so the tests that follow are limited as usual. */
+    private void awaitLimiterRecovered() throws InterruptedException {
+        for (int attempt = 0; attempt < 10; attempt++) {
+            Thread.sleep(1200);
+            double errors = limiterErrors();
+            rateLimiter.checkTenant("tenant-recovery-" + UUID.randomUUID());
+            if (limiterErrors() == errors) {
+                return;
+            }
+        }
+        throw new AssertionError("rate limiter did not recover after Redis was resumed");
+    }
+
+    private double counter(String name) {
+        var counter = registry.find(name).counter();
         return counter == null ? 0 : counter.count();
+    }
+
+    private double limiterErrors() {
+        return counter("ratelimit.errors");
     }
 
     @Test
@@ -196,10 +216,15 @@ class RateLimitIT extends AbstractIntegrationTest {
 
     @Test
     void twoLimitersOnOneRedisTogetherAdmitNoMoreThanTheCapacity() throws Exception {
-        TenantContext tenant = new TenantContext(UUID.randomUUID(), "tenant-shared", "ts_shared", "shared.readings");
+        String tenant = "tenant-shared-" + UUID.randomUUID().toString().substring(0, 8);
         // Separate clients and proxy managers, as two application instances would have.
-        RateLimiter first = new RateLimiter(limits, new RedisProxyManagerSource(redisProperties), platformMetrics);
-        RateLimiter second = new RateLimiter(limits, new RedisProxyManagerSource(redisProperties), platformMetrics);
+        RedisProxyManagerSource firstSource = new RedisProxyManagerSource(redisProperties);
+        RedisProxyManagerSource secondSource = new RedisProxyManagerSource(redisProperties);
+        RateLimiter first = new RateLimiter(limits, firstSource, platformMetrics);
+        RateLimiter second = new RateLimiter(limits, secondSource, platformMetrics);
+        // Connect first: callers that find a connect in progress are admitted unchecked rather than queued.
+        first.checkTenant("warmup-" + tenant);
+        second.checkTenant("warmup-" + tenant);
 
         AtomicInteger admitted = new AtomicInteger();
         List<Callable<Void>> attempts = new ArrayList<>();
@@ -222,6 +247,8 @@ class RateLimitIT extends AbstractIntegrationTest {
             }
         } finally {
             pool.shutdownNow();
+            firstSource.destroy();
+            secondSource.destroy();
         }
 
         assertThat(admitted.get()).isEqualTo(TENANT_CAPACITY);
@@ -230,16 +257,30 @@ class RateLimitIT extends AbstractIntegrationTest {
     @Test
     void requestsAreStillAcceptedWhileRedisIsDownAndTheErrorCounterRises() throws Exception {
         String tenant = newTenant("MACHINE-601");
+        // Warm up so the connection exists and the outage is a hang, not a refused connect.
+        ingest(tenantIngest(tenant), uniqueKey(), payloadFor("MACHINE-601")).andExpect(status().isAccepted());
         double errorsBefore = limiterErrors();
+        double skippedBefore = counter("ratelimit.skipped");
+        int burst = 20;
 
         // A paused container accepts connections but never answers: the worst case for latency.
         REDIS.getDockerClient().pauseContainerCmd(REDIS.getContainerId()).exec();
+        long elapsedMillis;
         try {
-            ingest(tenantIngest(tenant), uniqueKey(), payloadFor("MACHINE-601")).andExpect(status().isAccepted());
+            long start = System.nanoTime();
+            for (int i = 0; i < burst; i++) {
+                ingest(tenantIngest(tenant), uniqueKey(), payloadFor("MACHINE-601"))
+                        .andExpect(status().isAccepted());
+            }
+            elapsedMillis = (System.nanoTime() - start) / 1_000_000;
         } finally {
             REDIS.getDockerClient().unpauseContainerCmd(REDIS.getContainerId()).exec();
         }
+        awaitLimiterRecovered();
 
         assertThat(limiterErrors()).isGreaterThan(errorsBefore);
+        assertThat(counter("ratelimit.skipped")).isGreaterThan(skippedBefore);
+        // Without the breaker every request would wait on Redis timeouts: at least 200 ms x 20 = 4 s.
+        assertThat(elapsedMillis).isLessThan(burst * 200L);
     }
 }

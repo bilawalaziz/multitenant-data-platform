@@ -129,15 +129,17 @@ public class IngestionService {
 
     private IngestionResult process(
             Authentication authentication, String tenantHint, String idempotencyKey, byte[] body) {
-        TenantContext tenant = tenantResolver.resolve(authentication, tenantHint);
-        MDC.put(MdcKeys.TENANT_ID, tenant.code());
-        // Before any database work, so a flooding tenant cannot exhaust the connection pool.
-        rateLimiter.checkTenant(tenant);
+        // Both limits use only the token's claims, so a rejected request costs no database query and a flooding
+        // tenant or device cannot exhaust the connection pool.
+        String tenantCode = tenantResolver.claimedTenantCode(authentication, tenantHint);
+        MDC.put(MdcKeys.TENANT_ID, tenantCode);
+        rateLimiter.checkTenant(tenantCode);
         Optional<String> boundDevice = deviceBinding.boundDevice(authentication);
         // A device credential names its device up front; a tenant-wide one is limited once the payload is mapped.
         if (boundDevice.isPresent()) {
-            rateLimiter.checkDevice(tenant, boundDevice.get());
+            rateLimiter.checkDevice(tenantCode, boundDevice.get());
         }
+        TenantContext tenant = tenantResolver.resolve(authentication, tenantHint);
         // Opened before the first tenant-owned query and before the writer's transaction takes its connection.
         try (TenantScope ignored = TenantScope.tenant(tenant.id())) {
             return processInScope(tenant, boundDevice, idempotencyKey, body);
@@ -177,7 +179,7 @@ public class IngestionService {
 
         MappedFields fields = mappingEngine.map(payload, contract.mapping());
         if (boundDevice.isEmpty()) {
-            rateLimiter.checkDevice(tenant, fields.deviceId());
+            rateLimiter.checkDevice(tenant.code(), fields.deviceId());
         }
         DeviceBindingPolicy.requireSameDevice(boundDevice, fields.deviceId());
         devices.requireActiveDevice(tenant.id(), fields.deviceId());

@@ -20,6 +20,7 @@ public class PlatformMetrics {
     private final Counter rejected;
     private final Counter validationFailures;
     private final Counter rateLimitErrors;
+    private final Counter rateLimitSkipped;
     private final Counter publishSuccess;
     private final Counter publishFailure;
     private final Map<String, Counter> retentionDeleted;
@@ -46,6 +47,9 @@ public class PlatformMetrics {
                 .register(registry);
         this.rateLimitErrors = Counter.builder("ratelimit.errors")
                 .description("Rate limit checks skipped because the limiter store failed (requests fail open)")
+                .register(registry);
+        this.rateLimitSkipped = Counter.builder("ratelimit.skipped")
+                .description("Rate limit checks skipped while the limiter store is in its failure cooldown")
                 .register(registry);
         this.publishSuccess = Counter.builder("outbox.publish")
                 .tag("result", "success")
@@ -99,6 +103,10 @@ public class PlatformMetrics {
 
     public void rateLimitError() {
         rateLimitErrors.increment();
+    }
+
+    public void rateLimitSkipped() {
+        rateLimitSkipped.increment();
     }
 
     public void validationFailed() {

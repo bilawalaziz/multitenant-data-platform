@@ -89,6 +89,8 @@ platform:
     max-payload-bytes: 65536
   rate-limit:
     enabled: true
+    # After a Redis failure, admit requests without limiting for this long before trying Redis again.
+    failure-cooldown: 2s
     # Token buckets: capacity is the burst, refill-per-second the sustained rate. A device is expected to
     # report every few seconds; a tenant's budget is sized to what the database pool can absorb.
     tenant:

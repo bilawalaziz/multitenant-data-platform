@@ -20,7 +20,11 @@ public class TenantResolver {
         this.tenants = tenants;
     }
 
-    public TenantContext resolve(Authentication authentication, String tenantHeader) {
+    /**
+     * The tenant code the token names, after the header hint has been checked against it. Touches no database, so
+     * callers can rate limit by tenant before paying for {@link #resolve}.
+     */
+    public String claimedTenantCode(Authentication authentication, String tenantHeader) {
         String claim = tenantClaim(authentication);
         if (claim == null || claim.isBlank()) {
             throw new ApiException(ErrorCode.ACCESS_DENIED, "Token does not carry a tenant_id claim");
@@ -30,6 +34,11 @@ public class TenantResolver {
                 && !tenantHeader.trim().equals(claim)) {
             throw new ApiException(ErrorCode.TENANT_MISMATCH, "X-Tenant-ID does not match the tenant of the token");
         }
+        return claim;
+    }
+
+    public TenantContext resolve(Authentication authentication, String tenantHeader) {
+        String claim = claimedTenantCode(authentication, tenantHeader);
         Tenant tenant = tenants.findByTenantCode(claim)
                 .orElseThrow(() ->
                         new ApiException(ErrorCode.TENANT_NOT_REGISTERED, "Tenant '" + claim + "' is not registered"));

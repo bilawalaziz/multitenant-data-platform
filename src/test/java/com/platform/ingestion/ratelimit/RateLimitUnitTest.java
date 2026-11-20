@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.platform.ingestion.ratelimit.RateLimitProperties.Limit;
 import com.platform.ingestion.ratelimit.RateLimitProperties.TenantOverride;
+import java.time.Duration;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -14,6 +15,7 @@ class RateLimitUnitTest {
 
     private final RateLimitProperties properties = new RateLimitProperties(
             true,
+            Duration.ofSeconds(2),
             new Limit(400, 200),
             new Limit(20, 10),
             Map.of(
