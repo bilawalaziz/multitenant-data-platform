@@ -20,7 +20,10 @@ public class ProdRequiredSettings implements EnvironmentPostProcessor {
             "spring.flyway.password",
             "spring.kafka.bootstrap-servers",
             "spring.security.oauth2.resourceserver.jwt.issuer-uri",
-            "spring.security.oauth2.resourceserver.jwt.jwk-set-uri");
+            "spring.security.oauth2.resourceserver.jwt.jwk-set-uri",
+            "platform.keycloak.provisioner.url",
+            "platform.keycloak.provisioner.client-id",
+            "platform.keycloak.provisioner.client-secret");
 
     @Override
     public void postProcessEnvironment(ConfigurableEnvironment environment, SpringApplication application) {

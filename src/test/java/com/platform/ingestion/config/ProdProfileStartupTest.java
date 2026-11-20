@@ -24,6 +24,9 @@ class ProdProfileStartupTest {
         REQUIRED.put("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:1");
         REQUIRED.put("KEYCLOAK_ISSUER_URI", "http://127.0.0.1:1/realms/x");
         REQUIRED.put("KEYCLOAK_JWK_SET_URI", "http://127.0.0.1:1/certs");
+        REQUIRED.put("KEYCLOAK_ADMIN_URL", "http://127.0.0.1:1");
+        REQUIRED.put("PROVISIONER_CLIENT_ID", "sensor-platform-provisioner");
+        REQUIRED.put("PROVISIONER_CLIENT_SECRET", "s");
     }
 
     @ParameterizedTest
@@ -36,7 +39,10 @@ class ProdProfileStartupTest {
                 "DB_MIGRATION_PASSWORD",
                 "KAFKA_BOOTSTRAP_SERVERS",
                 "KEYCLOAK_ISSUER_URI",
-                "KEYCLOAK_JWK_SET_URI"
+                "KEYCLOAK_JWK_SET_URI",
+                "KEYCLOAK_ADMIN_URL",
+                "PROVISIONER_CLIENT_ID",
+                "PROVISIONER_CLIENT_SECRET"
             })
     void startupFailsNamingTheMissingVariable(String missing) {
         String[] provided = REQUIRED.entrySet().stream()

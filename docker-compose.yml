@@ -68,6 +68,7 @@ services:
       DEMO_USER_PASSWORD: ${DEMO_USER_PASSWORD:?set in .env}
       ALPHA_INGEST_CLIENT_SECRET: ${ALPHA_INGEST_CLIENT_SECRET:?set in .env}
       BETA_INGEST_CLIENT_SECRET: ${BETA_INGEST_CLIENT_SECRET:?set in .env}
+      PROVISIONER_CLIENT_SECRET: ${PROVISIONER_CLIENT_SECRET:?set in .env}
       JAVA_OPTS_KC_HEAP: "-Xms256m -Xmx512m"
     ports:
       - "${KEYCLOAK_HOST_PORT:-8180}:8080"
@@ -102,6 +103,10 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KEYCLOAK_ISSUER_URI: http://localhost:${KEYCLOAK_HOST_PORT:-8180}/realms/sensor-platform
       KEYCLOAK_JWK_SET_URI: http://keycloak:8080/realms/sensor-platform/protocol/openid-connect/certs
+      # per-device credentials: the app creates one Keycloak client per device through the admin API
+      KEYCLOAK_ADMIN_URL: http://keycloak:8080
+      PROVISIONER_CLIENT_ID: sensor-platform-provisioner
+      PROVISIONER_CLIENT_SECRET: ${PROVISIONER_CLIENT_SECRET:?set in .env}
       JAVA_OPTS: "-XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError -Xss512k"
     ports:
       - "${APP_HOST_PORT:-8080}:8080"

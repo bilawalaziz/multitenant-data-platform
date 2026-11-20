@@ -8,8 +8,10 @@ import com.platform.ingestion.persistence.IngestionRecord;
 import com.platform.ingestion.persistence.IngestionRecordRepository;
 import com.platform.ingestion.persistence.OutboxEvent;
 import com.platform.ingestion.persistence.OutboxRepository;
+import com.platform.ingestion.security.DeviceBindingPolicy;
 import com.platform.ingestion.tenant.TenantContext;
 import java.time.Instant;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -72,9 +74,11 @@ public class IngestionWriter {
     }
 
     @Transactional(readOnly = true)
-    public IngestionResponse replayResponse(UUID tenantId, UUID ingestionId) {
+    public IngestionResponse replayResponse(UUID tenantId, UUID ingestionId, Optional<String> boundDevice) {
         IngestionRecord record = records.findByIdAndTenantId(ingestionId, tenantId)
                 .orElseThrow(() -> ApiException.notFound("Ingestion"));
+        // Without this a device could read another device's stored result by reusing its idempotency key.
+        DeviceBindingPolicy.requireSameDevice(boundDevice, record.getDeviceId());
         JsonNode event = record.getCanonicalEvent();
         return new IngestionResponse(
                 "DUPLICATE",
