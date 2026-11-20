@@ -6,9 +6,11 @@ import com.platform.ingestion.messaging.KafkaEventPublisher;
 import com.platform.ingestion.messaging.OutboxMessage;
 import com.platform.ingestion.messaging.PublishException;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
@@ -28,7 +30,8 @@ public class TestSupportConfig {
 
         private final KafkaEventPublisher delegate;
         private final AtomicBoolean failing = new AtomicBoolean(false);
-        private final AtomicReference<Consumer<OutboxMessage>> interceptor = new AtomicReference<>();
+        private final AtomicReference<Function<OutboxMessage, CompletableFuture<Void>>> sender =
+                new AtomicReference<>();
 
         TogglingEventPublisher(KafkaEventPublisher delegate) {
             this.delegate = delegate;
@@ -39,24 +42,34 @@ public class TestSupportConfig {
         }
 
         /**
-         * When set, publish() calls this instead of Kafka (it may throw to simulate a failure). null restores
-         * Kafka.
+         * When set, publish() calls this instead of Kafka. It may return a future that completes later or
+         * exceptionally, or throw to simulate an immediate failure. null restores Kafka.
          */
+        public void setSender(Function<OutboxMessage, CompletableFuture<Void>> sender) {
+            this.sender.set(sender);
+        }
+
+        /** Like {@link #setSender} for a publisher that acknowledges at once unless the hook throws. */
         public void setInterceptor(Consumer<OutboxMessage> interceptor) {
-            this.interceptor.set(interceptor);
+            setSender(
+                    interceptor == null
+                            ? null
+                            : message -> {
+                                interceptor.accept(message);
+                                return CompletableFuture.completedFuture(null);
+                            });
         }
 
         @Override
-        public void publish(OutboxMessage message) {
-            Consumer<OutboxMessage> hook = interceptor.get();
+        public CompletableFuture<Void> publish(OutboxMessage message) {
+            Function<OutboxMessage, CompletableFuture<Void>> hook = sender.get();
             if (hook != null) {
-                hook.accept(message);
-                return;
+                return hook.apply(message);
             }
             if (failing.get()) {
                 throw new PublishException("simulated broker outage", null);
             }
-            delegate.publish(message);
+            return delegate.publish(message);
         }
     }
 
