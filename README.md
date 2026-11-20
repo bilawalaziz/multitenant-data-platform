@@ -79,6 +79,7 @@ claim. Swagger UI: `/swagger-ui.html`. OpenAPI document: `/v3/api-docs`.
 | GET       | /api/v1/tenants/{tenantId}/contracts/{contractId}[/versions/{version}]        | platform-admin, tenant-admin                |
 | POST      | /api/v1/tenants/{tenantId}/contracts/{contractId}/versions/{version}/activate | platform-admin, tenant-admin                |
 | POST, GET | /api/v1/tenants/{tenantId}/devices                                            | platform-admin, tenant-admin                |
+| POST      | /api/v1/tenants/{tenantId}/devices/{deviceId}/credentials, .../deactivate     | platform-admin, tenant-admin                |
 | POST      | /api/v1/ingestion/readings                                                    | tenant-ingest                               |
 | GET       | /api/v1/tenants/{tenantId}/ingestions[/{ingestionId}]                         | platform-admin, tenant-admin, tenant-ingest |
 
@@ -99,6 +100,9 @@ Environment variables read by `src/main/resources/application.yml`:
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9094`                                                             |
 | `KEYCLOAK_ISSUER_URI`     | `http://localhost:8180/realms/sensor-platform`                               |
 | `KEYCLOAK_JWK_SET_URI`    | `http://localhost:8180/realms/sensor-platform/protocol/openid-connect/certs` |
+| `KEYCLOAK_ADMIN_URL`      | `http://localhost:8180`. Keycloak base URL the app uses for the admin API.   |
+| `PROVISIONER_CLIENT_ID`   | `sensor-platform-provisioner`                                                |
+| `PROVISIONER_CLIENT_SECRET` | Empty. Without it device registration answers `503`.                       |
 | `MANAGEMENT_PORT`         | `8081`. Serves `health`, `info`, `prometheus`. Keep internal.                |
 
 Compose reads more variables from `.env.example` (`POSTGRES_*`, `KEYCLOAK_*`, `*_INGEST_CLIENT_SECRET`, `CONSUMER_*`).
@@ -108,6 +112,7 @@ Key `platform.*` properties:
 | Property                                  | Default      | Meaning                                         |
 |-------------------------------------------|--------------|-------------------------------------------------|
 | `platform.ingestion.max-payload-bytes`    | 65536        | Maximum reading body size                       |
+| `platform.security.tenant-ingest-credentials-enabled` | true (`false` with `prod`) | Accept tokens without a `device_id` claim |
 | `platform.kafka.send-timeout-ms`          | 12000        | Wait limit for one publish batch                |
 | `platform.outbox.fixed-delay-ms`          | 1000         | Delay between publisher cycles                  |
 | `platform.outbox.batch-size`              | 50           | Rows claimed per cycle                          |
@@ -120,8 +125,9 @@ Key `platform.*` properties:
 | `platform.retention.idempotency`          | 7d           | Keep idempotency keys. Must not exceed `ingestion-records`. |
 | `platform.retention.ingestion-records`    | 90d          | Keep ingestion records                          |
 
-With `prod`, six settings have no defaults and startup fails if one is missing: `DB_URL`, `DB_USER`,
-`DB_PASSWORD`, `KAFKA_BOOTSTRAP_SERVERS`, `KEYCLOAK_ISSUER_URI`, `KEYCLOAK_JWK_SET_URI`.
+With `prod`, these settings have no defaults and startup fails if one is missing: `DB_URL`, `DB_USER`,
+`DB_PASSWORD`, `DB_MIGRATION_USER`, `DB_MIGRATION_PASSWORD`, `KAFKA_BOOTSTRAP_SERVERS`, `KEYCLOAK_ISSUER_URI`,
+`KEYCLOAK_JWK_SET_URI`, `KEYCLOAK_ADMIN_URL`, `PROVISIONER_CLIENT_ID`, `PROVISIONER_CLIENT_SECRET`.
 
 ## Tests and local CI
 
@@ -147,13 +153,26 @@ Pre-commit hooks (`pip install pre-commit && pre-commit install`): whitespace, Y
   payload returns `409`. Retention: once the idempotency row is purged (7 days), a reused key is a new ingestion.
 - **Outbox.** Rows are claimed with `FOR UPDATE SKIP LOCKED` and a lease. Kafka is called outside any transaction.
   Delivery is at-least-once, so consumers deduplicate on `event_id`. The producer uses `acks=all` and idempotence.
+- **Device credentials.** Registering a device creates a Keycloak client (`client_credentials` only) and returns its
+  `clientId` and `clientSecret` once; `POST .../credentials` replaces the secret, or creates the client for a device
+  registered earlier. The client's tokens carry `tenant_id`, `device_id`, the API audience and only `tenant-ingest`.
+  A token with a `device_id` may only submit readings of that device (`403 DEVICE_MISMATCH`), including on an
+  idempotent replay. Tokens without `device_id` (the tenant-wide clients) work while
+  `platform.security.tenant-ingest-credentials-enabled` is true; otherwise `403 DEVICE_CREDENTIAL_REQUIRED`.
+  `POST .../deactivate` marks the device INACTIVE (readings get `422 DEVICE_NOT_REGISTERED` at once) and disables the
+  client; access tokens already issued stay valid until they expire (15 minutes in the demo realm). If Keycloak is
+  unreachable, registration fails with `503 CREDENTIAL_PROVISIONING_UNAVAILABLE` and no device is stored.
+  Client ids are `device-<tenant>-<device id lower-cased, characters outside a-z0-9. replaced by '-'>-<16 hex of
+  SHA-256(tenant, device id)>`; the hash keeps ids that differ only by case or punctuation distinct, because
+  Keycloak lower-cases the service-account username.
 - **Topics.** `<tenant>.readings`, created at registration or before the first send. Message key is `device_id`.
 - **Retention.** Hourly job, batches of 1000. Only PUBLISHED outbox rows are deleted. Ingestion records referenced by an idempotency row are kept.
 
 ## Known limitations
 
 - No Postgres row-level security. Tenant isolation is enforced in the application.
-- No per-device credentials. Devices are registry records; ingestion uses tenant client credentials.
+- Per-device clients are created in the same Keycloak realm; there is no automated clean-up if a client is left
+  behind after both the insert and the compensating delete fail (it is logged by client id).
 - No rate limiting and no distributed tracing.
 - Consumer deduplication uses a local sqlite file and is not shared between consumer instances.
 - Compose runs one Kafka broker with replication factor 1 and Keycloak in `start-dev` mode.
