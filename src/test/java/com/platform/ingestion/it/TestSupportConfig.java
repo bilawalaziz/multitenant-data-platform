@@ -11,9 +11,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import javax.sql.DataSource;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.security.oauth2.jwt.BadJwtException;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
@@ -71,6 +75,25 @@ public class TestSupportConfig {
             }
             return delegate.publish(message);
         }
+    }
+
+    /** Superuser template for assertions and fixtures that must see raw rows; it is not part of the application. */
+    @Bean
+    JdbcTemplate ownerJdbc(
+            @Value("${spring.flyway.url}") String url,
+            @Value("${spring.flyway.user}") String user,
+            @Value("${spring.flyway.password}") String password) {
+        return new JdbcTemplate(new DriverManagerDataSource(url, user, password));
+    }
+
+    /**
+     * Keeps the application's template on the scoped pool: defining {@link #ownerJdbc} would otherwise make
+     * Spring Boot skip its own JdbcTemplate.
+     */
+    @Bean
+    @Primary
+    JdbcTemplate jdbcTemplate(DataSource dataSource) {
+        return new JdbcTemplate(dataSource);
     }
 
     @Bean

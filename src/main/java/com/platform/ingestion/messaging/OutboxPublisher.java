@@ -5,6 +5,7 @@ import com.platform.ingestion.observability.PlatformMetrics;
 import com.platform.ingestion.persistence.OutboxEvent;
 import com.platform.ingestion.persistence.OutboxRepository;
 import com.platform.ingestion.persistence.OutboxStatus;
+import com.platform.ingestion.tenant.TenantScope;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -105,6 +106,13 @@ public class OutboxPublisher {
 
     /** @return number of rows published in this run. */
     public int publishDue() {
+        // Rows of every tenant are published, so the cycle runs with the system scope.
+        try (TenantScope ignored = TenantScope.system()) {
+            return publishDueInScope();
+        }
+    }
+
+    private int publishDueInScope() {
         List<Claim> claimed = claim();
         if (claimed.isEmpty()) {
             return 0;

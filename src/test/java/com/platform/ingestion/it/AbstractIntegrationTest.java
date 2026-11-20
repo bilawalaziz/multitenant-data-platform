@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.platform.ingestion.messaging.OutboxPublisher;
 import com.platform.ingestion.persistence.OutboxEvent;
 import com.platform.ingestion.persistence.OutboxRepository;
+import com.platform.ingestion.tenant.TenantScope;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,6 +20,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -28,6 +30,8 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.ResultActions;
@@ -52,9 +56,14 @@ import org.testcontainers.utility.DockerImageName;
 @Import(TestSupportConfig.class)
 public abstract class AbstractIntegrationTest {
 
-    @ServiceConnection
-    static final PostgreSQLContainer<?> POSTGRES =
-            new PostgreSQLContainer<>(DockerImageName.parse("postgres:17-alpine"));
+    static final String APP_ROLE = "sensor_app";
+    static final String APP_PASSWORD = "sensor_app_test_pw";
+
+    // No @ServiceConnection: the application connects as the restricted role and Flyway as the container superuser,
+    // which a single connection-details bean could not express.
+    static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>(
+                    DockerImageName.parse("postgres:17-alpine"))
+            .withInitScript("db/create-app-role.sql");
 
     @ServiceConnection
     static final KafkaContainer KAFKA = new SingleNodeKafkaContainer(DockerImageName.parse("apache/kafka:3.9.0"));
@@ -62,6 +71,17 @@ public abstract class AbstractIntegrationTest {
     static {
         POSTGRES.start();
         KAFKA.start();
+    }
+
+    @DynamicPropertySource
+    static void databaseRoles(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
+        registry.add("spring.datasource.username", () -> APP_ROLE);
+        registry.add("spring.datasource.password", () -> APP_PASSWORD);
+        registry.add("spring.flyway.url", POSTGRES::getJdbcUrl);
+        registry.add("spring.flyway.user", POSTGRES::getUsername);
+        registry.add("spring.flyway.password", POSTGRES::getPassword);
+        registry.add("spring.flyway.placeholders.app_role", () -> APP_ROLE);
     }
 
     protected static final String PLATFORM_ADMIN = "platform-admin";
@@ -72,8 +92,14 @@ public abstract class AbstractIntegrationTest {
     @Autowired
     protected ObjectMapper mapper;
 
+    /** Superuser connection: sees and changes raw state regardless of row-level security. */
     @Autowired
+    @Qualifier("ownerJdbc")
     protected JdbcTemplate jdbc;
+
+    /** The application's own connection pool, subject to row-level security. */
+    @Autowired
+    protected JdbcTemplate appJdbc;
 
     @Autowired
     protected OutboxPublisher outboxPublisher;
@@ -108,17 +134,19 @@ public abstract class AbstractIntegrationTest {
         registerTenant(tenant);
         UUID tenantId = jdbc.queryForObject("SELECT id FROM platform.tenants WHERE tenant_code=?", UUID.class, tenant);
         UUID eventId = UUID.randomUUID();
-        tx.executeWithoutResult(s -> outboxRepository.save(new OutboxEvent(
-                UUID.randomUUID(),
-                tenantId,
-                eventId,
-                tenant + ".readings",
-                device,
-                mapper.createObjectNode()
-                        .put("tenant_id", tenant)
-                        .put("schema_version", "1.0")
-                        .put("device_id", device),
-                createdAt)));
+        try (TenantScope scope = TenantScope.tenant(tenantId)) {
+            tx.executeWithoutResult(s -> outboxRepository.save(new OutboxEvent(
+                    UUID.randomUUID(),
+                    tenantId,
+                    eventId,
+                    tenant + ".readings",
+                    device,
+                    mapper.createObjectNode()
+                            .put("tenant_id", tenant)
+                            .put("schema_version", "1.0")
+                            .put("device_id", device),
+                    createdAt)));
+        }
         outboxFixtures.add(eventId);
         return eventId;
     }

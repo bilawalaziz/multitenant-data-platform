@@ -14,6 +14,7 @@ import com.platform.ingestion.messaging.TopicProvisioner;
 import com.platform.ingestion.observability.PlatformMetrics;
 import com.platform.ingestion.persistence.OutboxEvent;
 import com.platform.ingestion.persistence.OutboxRepository;
+import com.platform.ingestion.tenant.TenantScope;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
@@ -89,17 +90,19 @@ class KafkaUnavailableIT extends AbstractIntegrationTest {
                 jdbc.queryForObject("SELECT id FROM platform.tenants WHERE tenant_code='tenant-offline'", UUID.class);
         UUID eventId = UUID.randomUUID();
         Clock clock = Clock.systemUTC();
-        tx.executeWithoutResult(s -> outboxRepository.save(new OutboxEvent(
-                UUID.randomUUID(),
-                tenantId,
-                eventId,
-                "tenant-offline.readings",
-                "MACHINE-009",
-                mapper.createObjectNode()
-                        .put("tenant_id", "tenant-offline")
-                        .put("schema_version", "1.0")
-                        .put("device_id", "MACHINE-009"),
-                clock.instant().minusSeconds(1))));
+        try (TenantScope scope = TenantScope.tenant(tenantId)) {
+            tx.executeWithoutResult(s -> outboxRepository.save(new OutboxEvent(
+                    UUID.randomUUID(),
+                    tenantId,
+                    eventId,
+                    "tenant-offline.readings",
+                    "MACHINE-009",
+                    mapper.createObjectNode()
+                            .put("tenant_id", "tenant-offline")
+                            .put("schema_version", "1.0")
+                            .put("device_id", "MACHINE-009"),
+                    clock.instant().minusSeconds(1))));
+        }
 
         OutboxPublisher offline = new OutboxPublisher(
                 outboxRepository,
