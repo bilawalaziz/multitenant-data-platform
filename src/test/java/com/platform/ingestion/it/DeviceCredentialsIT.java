@@ -8,6 +8,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.platform.ingestion.credential.DeviceClientIds;
 import com.platform.ingestion.security.DeviceBindingPolicy;
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
@@ -219,6 +220,58 @@ class DeviceCredentialsIT extends AbstractIntegrationTest {
         assertThat(provisioner.clients).doesNotContainKey(provisioner.deleted.get(0));
         assertThat(count("SELECT count(*) FROM platform.devices WHERE device_id = ?", device))
                 .isEqualTo(1);
+    }
+
+    @Test
+    void orphanedClientDoesNotBlockRegistrationOrCredentialIssue() throws Exception {
+        String device = uniqueDevice();
+        String orphan = DeviceClientIds.forDevice(TENANT, device);
+        provisioner.clients.put(orphan, new TestSupportConfig.FakeDeviceCredentialProvisioner.Client("stale", true));
+
+        JsonNode registered = register(device);
+
+        assertThat(registered.get("clientId").asText()).isEqualTo(orphan);
+        assertThat(provisioner.clients.get(orphan).secret())
+                .isEqualTo(registered.get("clientSecret").asText())
+                .isNotEqualTo("stale");
+
+        String older = uniqueDevice();
+        String olderOrphan = DeviceClientIds.forDevice(TENANT, older);
+        jdbc.update(
+                "INSERT INTO platform.devices (id, tenant_id, device_id, status, created_at) "
+                        + "VALUES (?, ?, ?, 'ACTIVE', now())",
+                UUID.randomUUID(),
+                tenantId,
+                older);
+        provisioner.clients.put(
+                olderOrphan, new TestSupportConfig.FakeDeviceCredentialProvisioner.Client("stale", true));
+
+        assertThat(issue(older).get("clientId").asText()).isEqualTo(olderOrphan);
+        assertThat(provisioner.clients.get(olderOrphan).secret()).isNotEqualTo("stale");
+    }
+
+    @Test
+    void deactivationDuringCredentialIssueRemovesTheNewClient() throws Exception {
+        String device = uniqueDevice();
+        jdbc.update(
+                "INSERT INTO platform.devices (id, tenant_id, device_id, status, created_at) "
+                        + "VALUES (?, ?, ?, 'ACTIVE', now())",
+                UUID.randomUUID(),
+                tenantId,
+                device);
+        provisioner.setAfterCreate(() -> jdbc.update(
+                "UPDATE platform.devices SET status = 'INACTIVE' WHERE tenant_id = ? AND device_id = ?",
+                tenantId,
+                device));
+
+        mvc.perform(post("/api/v1/tenants/" + TENANT + "/devices/" + device + "/credentials")
+                        .header("Authorization", bearer(tenantAdmin(TENANT))))
+                .andExpect(status().isConflict());
+
+        assertThat(provisioner.clients).doesNotContainKey(DeviceClientIds.forDevice(TENANT, device));
+        assertThat(jdbc.queryForObject(
+                        "SELECT credential_client_id FROM platform.devices WHERE device_id = ?", String.class, device))
+                .isNull();
     }
 
     @Test

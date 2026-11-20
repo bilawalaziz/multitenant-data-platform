@@ -170,9 +170,9 @@ Pre-commit hooks (`pip install pre-commit && pre-commit install`): whitespace, Y
 
 ## Known limitations
 
-- No Postgres row-level security. Tenant isolation is enforced in the application.
 - Per-device clients are created in the same Keycloak realm; there is no automated clean-up if a client is left
-  behind after both the insert and the compensating delete fail (it is logged by client id).
+  behind after both the insert and the compensating delete fail (it is logged by client id); the next
+  registration or credential request for that device replaces such a client.
 - No rate limiting and no distributed tracing.
 - Consumer deduplication uses a local sqlite file and is not shared between consumer instances.
 - Compose runs one Kafka broker with replication factor 1 and Keycloak in `start-dev` mode.

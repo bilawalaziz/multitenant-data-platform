@@ -3,10 +3,9 @@
 ## Deployment requirements
 
 - Run with `SPRING_PROFILES_ACTIVE=prod`. These variables have no defaults in this profile: `DB_URL`, `DB_USER`,
-  `DB_PASSWORD`, `KAFKA_BOOTSTRAP_SERVERS`, `KEYCLOAK_ISSUER_URI`, `KEYCLOAK_JWK_SET_URI`. Startup fails naming
-  any that is missing.
-- With `prod` the provisioner settings are also required: `KEYCLOAK_ADMIN_URL`, `PROVISIONER_CLIENT_ID`,
-  `PROVISIONER_CLIENT_SECRET`. Tenant-wide ingestion tokens are refused in this profile
+  `DB_PASSWORD`, `DB_MIGRATION_USER`, `DB_MIGRATION_PASSWORD`, `KAFKA_BOOTSTRAP_SERVERS`, `KEYCLOAK_ISSUER_URI`,
+  `KEYCLOAK_JWK_SET_URI`, `KEYCLOAK_ADMIN_URL`, `PROVISIONER_CLIENT_ID`, `PROVISIONER_CLIENT_SECRET`. Startup fails
+  naming any that is missing. Tenant-wide ingestion tokens are refused in this profile
   (`platform.security.tenant-ingest-credentials-enabled=false`), so every device needs its own credential.
 - Setting `SPRING_PROFILES_ACTIVE=prod` replaces the image default `docker`. Both profiles log JSON (logstash
   format) to the console.

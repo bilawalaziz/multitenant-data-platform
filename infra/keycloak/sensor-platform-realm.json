@@ -828,7 +828,7 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
       "protocol": "openid-connect",
-      "fullScopeAllowed": true,
+      "fullScopeAllowed": false,
       "defaultClientScopes": [
         "kc-admin-api",
         "roles",
@@ -922,6 +922,17 @@
       ]
     }
   ],
+  "clientScopeMappings": {
+    "realm-management": [
+      {
+        "client": "sensor-platform-provisioner",
+        "roles": [
+          "manage-clients",
+          "manage-users"
+        ]
+      }
+    ]
+  },
   "users": [
     {
       "username": "platform-admin",

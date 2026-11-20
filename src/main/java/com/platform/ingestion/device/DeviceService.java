@@ -4,6 +4,7 @@ import com.platform.ingestion.common.ApiException;
 import com.platform.ingestion.common.ErrorCode;
 import com.platform.ingestion.credential.CredentialProvisioningException;
 import com.platform.ingestion.credential.CredentialProvisioningException.Reason;
+import com.platform.ingestion.credential.DeviceClientIds;
 import com.platform.ingestion.credential.DeviceCredential;
 import com.platform.ingestion.credential.DeviceCredentialProvisioner;
 import com.platform.ingestion.device.DeviceDtos.DeviceCredentialsResponse;
@@ -31,6 +32,10 @@ public class DeviceService {
 
     private static final Logger log = LoggerFactory.getLogger(DeviceService.class);
 
+    // Serialises create-then-insert for one device inside this instance, so an orphan clean-up cannot delete the
+    // client another request for the same device has just created. Separate instances are not coordinated.
+    private final Object[] deviceLocks = new Object[64];
+
     private final DeviceRepository devices;
     private final TenantService tenantService;
     private final DeviceCredentialProvisioner provisioner;
@@ -48,14 +53,27 @@ public class DeviceService {
         this.provisioner = provisioner;
         this.tx = tx;
         this.clock = clock;
+        for (int i = 0; i < deviceLocks.length; i++) {
+            deviceLocks[i] = new Object();
+        }
+    }
+
+    private Object lockFor(String tenantCode, String deviceId) {
+        return deviceLocks[Math.floorMod((tenantCode + "/" + deviceId).hashCode(), deviceLocks.length)];
     }
 
     public RegisteredDeviceResponse register(String tenantCode, String deviceId, String description) {
+        synchronized (lockFor(tenantCode, deviceId)) {
+            return registerLocked(tenantCode, deviceId, description);
+        }
+    }
+
+    private RegisteredDeviceResponse registerLocked(String tenantCode, String deviceId, String description) {
         UUID tenantId = tenantService.requireContext(tenantCode).id();
         if (devices.existsByTenantIdAndDeviceId(tenantId, deviceId)) {
             throw conflict(deviceId);
         }
-        DeviceCredential credential = provision(() -> provisioner.create(tenantCode, deviceId));
+        DeviceCredential credential = provision(() -> createCredential(tenantCode, deviceId));
         Device saved;
         try {
             saved = tx.execute(status -> {
@@ -91,6 +109,12 @@ public class DeviceService {
 
     /** Creates the client for a device that has none, otherwise replaces the secret of the existing one. */
     public DeviceCredentialsResponse issueCredentials(String tenantCode, String deviceId) {
+        synchronized (lockFor(tenantCode, deviceId)) {
+            return issueCredentialsLocked(tenantCode, deviceId);
+        }
+    }
+
+    private DeviceCredentialsResponse issueCredentialsLocked(String tenantCode, String deviceId) {
         UUID tenantId = tenantService.requireContext(tenantCode).id();
         Device device = devices.findByTenantIdAndDeviceId(tenantId, deviceId)
                 .orElseThrow(() -> ApiException.notFound("Device"));
@@ -102,10 +126,14 @@ public class DeviceService {
             String secret = provision(() -> provisioner.rotateSecret(existingClient));
             return new DeviceCredentialsResponse(deviceId, existingClient, secret);
         }
-        DeviceCredential credential = provision(() -> provisioner.create(tenantCode, deviceId));
+        DeviceCredential credential = provision(() -> createCredential(tenantCode, deviceId));
         try {
             tx.executeWithoutResult(status -> {
                 Device current = devices.findById(device.getId()).orElseThrow();
+                // Deactivation may have committed while the client was being created.
+                if (current.getStatus() != DeviceStatus.ACTIVE) {
+                    throw new ApiException(ErrorCode.CONFLICT, "Device '" + deviceId + "' is not active");
+                }
                 current.assignCredentialClient(credential.clientId());
                 devices.saveAndFlush(current);
             });
@@ -147,6 +175,24 @@ public class DeviceService {
             throw new ApiException(
                     ErrorCode.DEVICE_NOT_REGISTERED,
                     "Device '" + deviceId + "' is not registered as an active device for this tenant");
+        }
+    }
+
+    /**
+     * A client that exists without any device referencing it is left over from an earlier attempt whose cleanup
+     * failed or whose response was lost; it is replaced instead of blocking the device forever.
+     */
+    private DeviceCredential createCredential(String tenantCode, String deviceId) {
+        try {
+            return provisioner.create(tenantCode, deviceId);
+        } catch (CredentialProvisioningException e) {
+            String clientId = DeviceClientIds.forDevice(tenantCode, deviceId);
+            if (e.reason() != Reason.CONFLICT || devices.existsByCredentialClientId(clientId)) {
+                throw e;
+            }
+            log.warn("Replacing orphaned client {} that no device references", clientId);
+            provisioner.delete(clientId);
+            return provisioner.create(tenantCode, deviceId);
         }
     }
 
