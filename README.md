@@ -327,7 +327,8 @@ registration still succeeds and the publisher ensures the topic before the first
 ### Observability
 
 Prometheus scrapes `/actuator/prometheus` on the management port (`MANAGEMENT_PORT`, default 8081), which is not
-served on the API port and must not be exposed publicly. Alert rules are in `infra/prometheus/alerts.yml`. Custom metrics use low-cardinality labels only:
+served on the API port and must not be exposed publicly. Alert rules are in `infra/prometheus/alerts.yml`; delivering them to on-call needs an Alertmanager configured at
+deployment (the compose stack only evaluates the rules). Custom metrics use low-cardinality labels only:
 
 | Metric | Labels |
 |---|---|

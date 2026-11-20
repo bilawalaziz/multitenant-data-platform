@@ -67,3 +67,109 @@ tests:
       - eval_time: 25m
         alertname: HighRejectionRate
         exp_alerts: []
+
+  - name: outbox backlog
+    interval: 1m
+    input_series:
+      - series: "outbox_pending_events"
+        values: "2000x20"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: OutboxBacklog
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: OutboxBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "More than 1000 outbox events have been waiting to be published for 10 minutes"
+
+  - name: small outbox backlog does not alert
+    interval: 1m
+    input_series:
+      - series: "outbox_pending_events"
+        values: "500x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: OutboxBacklog
+        exp_alerts: []
+
+  - name: kafka publish failures
+    interval: 1m
+    input_series:
+      - series: 'outbox_publish_total{result="failure"}'
+        values: "0+60x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: KafkaPublishFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Publishing to Kafka has been failing for 5 minutes"
+
+  - name: no new publish failures does not alert
+    interval: 1m
+    input_series:
+      - series: 'outbox_publish_total{result="failure"}'
+        values: "7x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: KafkaPublishFailures
+        exp_alerts: []
+
+  - name: high ingestion latency
+    interval: 1m
+    input_series:
+      # every request takes between 0.5 s and 1 s
+      - series: 'ingestion_processing_seconds_bucket{le="0.25"}'
+        values: "0x30"
+      - series: 'ingestion_processing_seconds_bucket{le="0.5"}'
+        values: "0x30"
+      - series: 'ingestion_processing_seconds_bucket{le="1"}'
+        values: "0+100x30"
+      - series: 'ingestion_processing_seconds_bucket{le="+Inf"}'
+        values: "0+100x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: HighIngestionLatency
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "p95 ingestion processing time has been above 500 ms for 10 minutes"
+
+  - name: fast ingestion does not alert
+    interval: 1m
+    input_series:
+      - series: 'ingestion_processing_seconds_bucket{le="0.25"}'
+        values: "0+100x30"
+      - series: 'ingestion_processing_seconds_bucket{le="0.5"}'
+        values: "0+100x30"
+      - series: 'ingestion_processing_seconds_bucket{le="1"}'
+        values: "0+100x30"
+      - series: 'ingestion_processing_seconds_bucket{le="+Inf"}'
+        values: "0+100x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: HighIngestionLatency
+        exp_alerts: []
+
+  - name: scrape target missing
+    interval: 1m
+    input_series:
+      - series: 'up{job="other"}'
+        values: "1x10"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: AppTargetMissing
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: AppTargetMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: sensor-ingestion-platform
+            exp_annotations:
+              summary: "Prometheus has no scrape target for the ingestion service"

@@ -9,6 +9,15 @@ groups:
         annotations:
           summary: "The ingestion service is not reachable by Prometheus"
 
+      - alert: AppTargetMissing
+        # AppDown cannot fire when the target disappears (for example a broken scrape config)
+        expr: absent(up{job="sensor-ingestion-platform"})
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus has no scrape target for the ingestion service"
+
       - alert: OutboxBacklog
         expr: outbox_pending_events > 1000
         for: 10m
