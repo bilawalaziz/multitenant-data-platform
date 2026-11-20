@@ -3,8 +3,6 @@ package com.platform.ingestion.it;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.platform.ingestion.messaging.PublishException;
-import com.platform.ingestion.persistence.OutboxEvent;
-import com.platform.ingestion.persistence.OutboxRepository;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -15,55 +13,19 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import javax.sql.DataSource;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.transaction.support.TransactionTemplate;
 
-/** Lease-based outbox claim: nothing is locked while publishing, outcomes are committed per row, leases expire. */
+/** Lease-based outbox claim: nothing is locked while publishing, outcomes are committed, leases expire. */
 class OutboxLeaseIT extends AbstractIntegrationTest {
 
     private static final String TENANT = "tenant-lease";
 
     @Autowired
-    private OutboxRepository outboxRepository;
-
-    @Autowired
-    private TransactionTemplate tx;
-
-    @Autowired
     private DataSource dataSource;
 
-    private final List<UUID> created = new ArrayList<>();
-
-    @AfterEach
-    void cleanUp() {
-        toggling.setInterceptor(null);
-        toggling.setFailing(false);
-        for (UUID eventId : created) {
-            jdbc.update(
-                    "UPDATE platform.outbox_events SET status='PUBLISHED', published_at=now() WHERE event_id = ?",
-                    eventId);
-        }
-    }
-
     private UUID newRow(String device, Instant createdAt) throws Exception {
-        registerTenant(TENANT);
-        UUID tenantId = jdbc.queryForObject("SELECT id FROM platform.tenants WHERE tenant_code=?", UUID.class, TENANT);
-        UUID eventId = UUID.randomUUID();
-        tx.executeWithoutResult(s -> outboxRepository.save(new OutboxEvent(
-                UUID.randomUUID(),
-                tenantId,
-                eventId,
-                TENANT + ".readings",
-                device,
-                mapper.createObjectNode()
-                        .put("tenant_id", TENANT)
-                        .put("schema_version", "1.0")
-                        .put("device_id", device),
-                createdAt)));
-        created.add(eventId);
-        return eventId;
+        return newOutboxRow(TENANT, device, createdAt);
     }
 
     @Test
@@ -104,7 +66,7 @@ class OutboxLeaseIT extends AbstractIntegrationTest {
     }
 
     @Test
-    void failedAttemptIsCommittedAndRestOfBatchReleased() throws Exception {
+    void failedAttemptIsCommittedAndSkippedRowOfSameTopicIsReleasedWithoutAnAttempt() throws Exception {
         drainOutbox();
         Instant base = Instant.now().minusSeconds(20);
         UUID first = newRow("LEASE-A", base);
@@ -128,7 +90,7 @@ class OutboxLeaseIT extends AbstractIntegrationTest {
         Map<String, Object> b = jdbc.queryForMap(
                 "SELECT status, attempts, next_attempt_at FROM platform.outbox_events WHERE event_id = ?", second);
         assertThat(b.get("status")).isEqualTo("PENDING");
-        assertThat(((Number) b.get("attempts")).intValue()).isZero(); // never attempted
+        assertThat(((Number) b.get("attempts")).intValue()).isZero(); // never sent, so no attempt counted
         assertThat(((Timestamp) b.get("next_attempt_at")).toInstant())
                 .isEqualTo(firstNext); // released, not leased 30 s
     }

@@ -15,17 +15,12 @@ import java.util.TreeSet;
 import java.util.regex.Pattern;
 import org.springframework.stereotype.Component;
 
-/**
- * Parses and validates a mapping document: known targets and transforms, all required targets present,
- * valid path syntax, and every path must exist in the contract request schema (following local $refs).
- */
 @Component
 public class MappingValidator {
 
     private static final Pattern METADATA_NAME = Pattern.compile("^[A-Za-z0-9_]{1,64}$");
     private static final Set<String> SPEC_KEYS = Set.of("path", "transforms", "map", "default");
 
-    /** Syntax-only parse (used at runtime for already validated, stored mappings). */
     public MappingDocument parse(JsonNode mapping) {
         List<FieldError> errors = new ArrayList<>();
         MappingDocument doc = parse(mapping, errors);
@@ -35,7 +30,6 @@ public class MappingValidator {
         return doc;
     }
 
-    /** Full validation against the request schema document. */
     public MappingDocument validate(JsonNode mapping, JsonNode requestSchemaDocument) {
         List<FieldError> errors = new ArrayList<>();
         MappingDocument doc = parse(mapping, errors);

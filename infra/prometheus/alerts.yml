@@ -1,0 +1,64 @@
+groups:
+  - name: sensor-ingestion-platform
+    rules:
+      - alert: AppDown
+        expr: up{job="sensor-ingestion-platform"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The ingestion service is not reachable by Prometheus"
+
+      - alert: AppTargetMissing
+        # AppDown cannot fire when the target disappears (for example a broken scrape config)
+        expr: absent(up{job="sensor-ingestion-platform"})
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus has no scrape target for the ingestion service"
+
+      - alert: OutboxBacklog
+        expr: outbox_pending_events > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 1000 outbox events have been waiting to be published for 10 minutes"
+
+      - alert: OutboxFailedEvents
+        expr: outbox_failed_events > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox events exhausted their attempts and need an operator (requeue or investigate)"
+
+      - alert: KafkaPublishFailures
+        expr: sum(rate(outbox_publish_total{result="failure"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Publishing to Kafka has been failing for 5 minutes"
+
+      - alert: HighRejectionRate
+        # The traffic floor keeps a handful of requests on a quiet system from alerting.
+        expr: |
+          sum(rate(ingestion_requests_total{outcome="rejected"}[10m]))
+            / sum(rate(ingestion_requests_total[10m])) > 0.2
+          and sum(rate(ingestion_requests_total[10m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 20% of ingestion requests were rejected over the last 10 minutes"
+
+      - alert: HighIngestionLatency
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(ingestion_processing_seconds_bucket[5m]))) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 ingestion processing time has been above 500 ms for 10 minutes"

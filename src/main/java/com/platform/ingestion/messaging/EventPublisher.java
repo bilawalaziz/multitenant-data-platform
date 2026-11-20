@@ -1,8 +1,12 @@
 package com.platform.ingestion.messaging;
 
-/** Port for publishing canonical events. Implementations must block until the broker acknowledged the record. */
+import java.util.concurrent.CompletableFuture;
+
 public interface EventPublisher {
 
-    /** @throws PublishException when the record was not acknowledged. */
-    void publish(OutboxMessage message);
+    /**
+     * Sends without waiting for the ack. The future fails with {@link PublishException}; an immediate runtime
+     * exception is treated the same way.
+     */
+    CompletableFuture<Void> publish(OutboxMessage message);
 }

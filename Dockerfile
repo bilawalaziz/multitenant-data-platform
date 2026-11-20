@@ -18,7 +18,7 @@ COPY --from=build /build/app.jar /app/app.jar
 USER app
 ENV SPRING_PROFILES_ACTIVE=docker \
     JAVA_OPTS="-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError -Xss512k"
-EXPOSE 8080
+EXPOSE 8080 8081
 HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=10 \
-  CMD wget -qO- http://localhost:8080/actuator/health | grep -q '"status":"UP"' || exit 1
+  CMD wget -qO- http://localhost:8081/actuator/health | grep -q '"status":"UP"' || exit 1
 ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]

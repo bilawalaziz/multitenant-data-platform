@@ -16,7 +16,6 @@ import com.platform.ingestion.transformation.MappingValidator;
 import com.platform.ingestion.validation.SchemaValidationService;
 import java.io.IOException;
 import java.time.Clock;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -202,9 +201,5 @@ public class ContractService {
     private ContractVersion requireVersion(UUID contractId, UUID tenantId, int version) {
         return versions.findByContractIdAndTenantIdAndVersion(contractId, tenantId, version)
                 .orElseThrow(() -> ApiException.notFound("Contract version"));
-    }
-
-    static Comparator<ContractVersion> byVersion() {
-        return Comparator.comparingInt(ContractVersion::getVersion);
     }
 }

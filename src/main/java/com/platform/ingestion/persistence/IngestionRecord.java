@@ -11,7 +11,6 @@ import java.util.UUID;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
-/** Accepted ingestion: the raw tenant payload plus the canonical event derived from it. */
 @Entity
 @Table(name = "ingestion_records")
 public class IngestionRecord extends PersistableEntity {

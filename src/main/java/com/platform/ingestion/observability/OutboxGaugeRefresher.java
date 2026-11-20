@@ -7,7 +7,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-/** Refreshes the outbox gauges every 5 seconds so scrapes never hit the database. */
 @Component
 public class OutboxGaugeRefresher {
 

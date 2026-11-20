@@ -7,12 +7,19 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.platform.ingestion.messaging.OutboxPublisher;
+import com.platform.ingestion.persistence.OutboxEvent;
+import com.platform.ingestion.persistence.OutboxRepository;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -25,6 +32,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.kafka.KafkaContainer;
 import org.testcontainers.utility.DockerImageName;
@@ -33,7 +41,12 @@ import org.testcontainers.utility.DockerImageName;
  * Shared base: one PostgreSQL and one Kafka container for the whole test JVM (singleton pattern) and one cached
  * Spring context. The outbox scheduler is disabled; tests drive {@link OutboxPublisher#publishDue()} directly.
  */
-@SpringBootTest(properties = {"platform.outbox.enabled=false", "platform.kafka.admin-timeout-ms=10000"})
+@SpringBootTest(
+        properties = {
+            "platform.outbox.enabled=false",
+            "platform.retention.enabled=false",
+            "platform.kafka.admin-timeout-ms=10000"
+        })
 @AutoConfigureMockMvc
 @AutoConfigureObservability
 @Import(TestSupportConfig.class)
@@ -67,6 +80,55 @@ public abstract class AbstractIntegrationTest {
 
     @Autowired
     protected TestSupportConfig.TogglingEventPublisher toggling;
+
+    @Autowired
+    protected OutboxRepository outboxRepository;
+
+    @Autowired
+    protected TransactionTemplate tx;
+
+    private final List<UUID> outboxFixtures = new ArrayList<>();
+
+    /** Restores the publisher and retires outbox rows created by {@link #newOutboxRow} so tests stay independent. */
+    @AfterEach
+    void resetOutboxFixtures() {
+        toggling.setSender(null);
+        toggling.setFailing(false);
+        for (UUID eventId : outboxFixtures) {
+            jdbc.update(
+                    "UPDATE platform.outbox_events SET status='PUBLISHED', published_at=now() "
+                            + "WHERE event_id = ? AND status <> 'PUBLISHED'",
+                    eventId);
+        }
+        outboxFixtures.clear();
+    }
+
+    /** Inserts a PENDING outbox row on the tenant's topic (registering the tenant if needed); returns its event id. */
+    protected UUID newOutboxRow(String tenant, String device, Instant createdAt) throws Exception {
+        registerTenant(tenant);
+        UUID tenantId = jdbc.queryForObject("SELECT id FROM platform.tenants WHERE tenant_code=?", UUID.class, tenant);
+        UUID eventId = UUID.randomUUID();
+        tx.executeWithoutResult(s -> outboxRepository.save(new OutboxEvent(
+                UUID.randomUUID(),
+                tenantId,
+                eventId,
+                tenant + ".readings",
+                device,
+                mapper.createObjectNode()
+                        .put("tenant_id", tenant)
+                        .put("schema_version", "1.0")
+                        .put("device_id", device),
+                createdAt)));
+        outboxFixtures.add(eventId);
+        return eventId;
+    }
+
+    /** Spring Kafka properties with the producer max.block.ms the publisher takes into account. */
+    protected static KafkaProperties springKafka(int maxBlockMs) {
+        KafkaProperties kafka = new KafkaProperties();
+        kafka.getProducer().getProperties().put("max.block.ms", String.valueOf(maxBlockMs));
+        return kafka;
+    }
 
     protected static String bearer(String token) {
         return "Bearer " + token;

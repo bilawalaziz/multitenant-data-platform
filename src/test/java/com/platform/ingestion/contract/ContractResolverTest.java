@@ -74,17 +74,13 @@ class ContractResolverTest {
     }
 
     @Test
-    void noActiveVersionMeansNoActiveContract() {
+    void noActiveVersionOrNoMappingMeansTheTenantCannotIngest() {
         when(versions.findByTenantIdAndStatus(tenant.id(), ContractStatus.ACTIVE))
                 .thenReturn(Optional.empty());
-
         assertThatThrownBy(() -> resolver.resolveActive(tenant))
                 .isInstanceOfSatisfying(
                         ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.NO_ACTIVE_CONTRACT));
-    }
 
-    @Test
-    void activeVersionWithoutMappingIsNotUsable() {
         UUID contractId = UUID.randomUUID();
         ContractVersion version = new ContractVersion(
                 UUID.randomUUID(),

@@ -24,7 +24,6 @@ public class IngestionController {
         this.ingestionService = ingestionService;
     }
 
-    /** Reads the raw body (bounded) so the original payload is validated and stored untouched. */
     @PostMapping("/readings")
     public ResponseEntity<IngestionResponse> ingest(
             Authentication authentication,

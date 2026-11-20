@@ -1,6 +1,5 @@
 package com.platform.ingestion.security;
 
-/** Authority names (without ROLE_ prefix) derived from Keycloak realm roles. */
 public final class Roles {
 
     public static final String PLATFORM_ADMIN = "PLATFORM_ADMIN";

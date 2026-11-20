@@ -8,8 +8,9 @@ Usage:
     python scripts/demo.py list
 
 Configuration (environment variables or a .env file in the project root):
-    APP_URL (http://localhost:8080)  KEYCLOAK_URL (http://localhost:8180)  PROMETHEUS_URL (http://localhost:9090)
-    GRAFANA_URL (http://localhost:3000)  DEMO_USER_PASSWORD  ALPHA_INGEST_CLIENT_SECRET  BETA_INGEST_CLIENT_SECRET
+    APP_URL (http://localhost:8080)  MANAGEMENT_URL (http://localhost:8081)  KEYCLOAK_URL (http://localhost:8180)
+    PROMETHEUS_URL (http://localhost:9090)  GRAFANA_URL (http://localhost:3000)
+    DEMO_USER_PASSWORD  ALPHA_INGEST_CLIENT_SECRET  BETA_INGEST_CLIENT_SECRET
     DEMO_FORCE_UPLOAD=1 uploads a new contract version even if an active one exists.
 
 Every ingestion uses a fresh uuid-based Idempotency-Key, so the demo is re-runnable. Exit code is non-zero if any
@@ -54,6 +55,7 @@ def cfg(name, default=None):
 
 
 APP = cfg("APP_URL", "http://localhost:%s" % cfg("APP_HOST_PORT", "8080")).rstrip("/")
+MGMT = cfg("MANAGEMENT_URL", "http://localhost:8081").rstrip("/")
 KC = cfg("KEYCLOAK_URL", "http://localhost:%s" % cfg("KEYCLOAK_HOST_PORT", "8180")).rstrip("/")
 PROM = cfg("PROMETHEUS_URL", "http://localhost:%s" % cfg("PROMETHEUS_HOST_PORT", "9090")).rstrip("/")
 GRAFANA = cfg("GRAFANA_URL", "http://localhost:%s" % cfg("GRAFANA_HOST_PORT", "3000")).rstrip("/")
@@ -279,7 +281,7 @@ def canonical_of(rec):
 # ----------------------------------------------------------------------------- scenarios
 def s01_health():
     title(1, "Check services are healthy")
-    st, body, _ = http("GET", APP + "/actuator/health")
+    st, body, _ = http("GET", MGMT + "/actuator/health")
     expect(
         "app /actuator/health is UP", st == 200 and isinstance(body, dict) and body.get("status") == "UP", (st, body)
     )

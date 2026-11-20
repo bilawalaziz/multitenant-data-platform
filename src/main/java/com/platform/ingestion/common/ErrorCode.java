@@ -2,7 +2,6 @@ package com.platform.ingestion.common;
 
 import org.springframework.http.HttpStatus;
 
-/** Error codes returned in the {@code code} field of the error body. */
 public enum ErrorCode {
     UNAUTHENTICATED(HttpStatus.UNAUTHORIZED),
     ACCESS_DENIED(HttpStatus.FORBIDDEN),

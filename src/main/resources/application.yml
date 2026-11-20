@@ -11,6 +11,16 @@ spring:
     password: ${DB_PASSWORD:sensor_dev_pw}
     hikari:
       maximum-pool-size: 10
+      connection-timeout: 5000
+      data-source-properties:
+        # Server-side limits for every pooled connection, including Flyway. A migration that needs longer
+        # (for example an index build on a large table) raises its own limit with SET LOCAL statement_timeout.
+        options: "-c statement_timeout=${DB_STATEMENT_TIMEOUT_MS:15000} -c lock_timeout=${DB_LOCK_TIMEOUT_MS:5000}"
+  task:
+    scheduling:
+      pool:
+        # outbox publisher, gauge refresher and retention job must not queue behind each other
+        size: 3
   jpa:
     open-in-view: false
     hibernate:
@@ -67,9 +77,21 @@ platform:
     max-attempts: 50
     backoff-base-ms: 1000
     backoff-cap-ms: 30000
-    lease: 30s
+    lease: 60s
+    issue-deadline: 10s
+  retention:
+    enabled: true
+    fixed-delay: PT1H
+    outbox-published: 7d
+    idempotency: 7d
+    ingestion-records: 90d
+    batch-size: 1000
+    max-batches-per-run: 100
 
 management:
+  server:
+    # Actuator is not served on the API port; keep this port internal to the deployment network.
+    port: ${MANAGEMENT_PORT:8081}
   endpoints:
     web:
       exposure:
@@ -94,6 +116,29 @@ springdoc:
 logging:
   level:
     org.apache.kafka: WARN
+
+---
+# No defaults: startup fails with an unresolved placeholder when any of these is missing.
+spring:
+  config:
+    activate:
+      on-profile: prod
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USER}
+    password: ${DB_PASSWORD}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS}
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${KEYCLOAK_ISSUER_URI}
+          jwk-set-uri: ${KEYCLOAK_JWK_SET_URI}
+logging:
+  structured:
+    format:
+      console: logstash
 
 ---
 spring:

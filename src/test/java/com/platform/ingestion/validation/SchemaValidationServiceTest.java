@@ -9,7 +9,11 @@ import com.platform.ingestion.common.ApiException;
 import com.platform.ingestion.common.FieldError;
 import java.util.List;
 import java.util.UUID;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 class SchemaValidationServiceTest {
 
@@ -63,124 +67,54 @@ class SchemaValidationServiceTest {
                 "recordedAt":"2026-11-17T14:30:00Z"}
             """;
 
-    @Test
-    void validPayloadHasNoErrors() {
-        assertThat(validate(VALID)).isEmpty();
-    }
-
-    @Test
-    void reportsMissingRequiredPropertiesByName() {
-        assertThat(validate("{\"deviceId\":\"MACHINE-001\"}"))
-                .contains(
-                        new FieldError("temperature", "Missing required field"),
-                        new FieldError("unit", "Missing required field"),
-                        new FieldError("recordedAt", "Missing required field"));
-    }
-
-    @Test
-    void reportsTypeErrorsWithFriendlyMessages() {
-        List<FieldError> errors = validate(
+    static Stream<Arguments> invalidPayloads() {
+        String nested =
                 """
-                {"deviceId": 12, "temperature": "hot", "unit": "celsius", "recordedAt": "2026-11-17T14:30:00Z",
-                 "count": 1.5, "active": "yes"}
-                """);
-        assertThat(errors)
-                .contains(
-                        new FieldError("temperature", "Expected numeric value"),
-                        new FieldError("deviceId", "Expected string value"),
-                        new FieldError("count", "Expected integer value"),
-                        new FieldError("active", "Expected boolean value"));
+                {"deviceId":"MACHINE-001","temperature":1,"unit":"celsius","recordedAt":"2026-11-17T14:30:00Z",
+                 %s}
+                """;
+        return Stream.of(
+                Arguments.of("{\"deviceId\":\"MACHINE-001\"}", "temperature", "Missing required field"),
+                Arguments.of("{\"deviceId\":\"MACHINE-001\"}", "unit", "Missing required field"),
+                Arguments.of("{\"deviceId\":\"MACHINE-001\"}", "recordedAt", "Missing required field"),
+                Arguments.of(VALID.replace("21.5", "\"hot\""), "temperature", "Expected numeric value"),
+                Arguments.of(VALID.replace("}\n", ",\"count\":1.5}\n"), "count", "Expected integer value"),
+                Arguments.of(VALID.replace("}\n", ",\"active\":\"yes\"}\n"), "active", "Expected boolean value"),
+                Arguments.of(VALID.replace("\"MACHINE-001\"", "12"), "deviceId", "Expected string value"),
+                Arguments.of(VALID.replace("21.5", "501"), "temperature", "500"),
+                Arguments.of(VALID.replace("21.5", "-51"), "temperature", "-50"),
+                Arguments.of(VALID.replace("MACHINE-001", "PUMP-1"), "deviceId", "pattern"),
+                Arguments.of(VALID.replace("MACHINE-001", "MACHINE-0012345"), "deviceId", "11"),
+                Arguments.of(VALID.replace("celsius", "kelvin"), "unit", "Must be one of: celsius, fahrenheit"),
+                Arguments.of(VALID.replace("2026-11-17T14:30:00Z", "yesterday"), "recordedAt", "date-time"),
+                Arguments.of(
+                        nested.formatted("\"location\":{\"line\":\"A\"}"), "location.site", "Missing required field"),
+                Arguments.of(nested.formatted("\"tags\":[\"a\",\"b\",\"c\"]"), "tags", "at most 2"),
+                Arguments.of(nested.formatted("\"tags\":[\"a\",7]"), "tags[1]", "Expected string value"));
+    }
+
+    @ParameterizedTest(name = "{1}: {2}")
+    @MethodSource("invalidPayloads")
+    void mapsLibraryErrorsToFieldMessages(String payload, String field, String messageFragment) {
+        assertThat(validate(payload))
+                .anyMatch(e ->
+                        e.field().equals(field) && e.message().toLowerCase().contains(messageFragment.toLowerCase()));
     }
 
     @Test
-    void enforcesNumericBounds() {
-        assertThat(validate(VALID.replace("21.5", "501")))
-                .anyMatch(e -> e.field().equals("temperature") && e.message().contains("500"));
-        assertThat(validate(VALID.replace("21.5", "-51")))
-                .anyMatch(e -> e.field().equals("temperature") && e.message().contains("-50"));
+    void acceptsValidPayloadsAndOpenApi30Dialect() {
+        assertThat(validate(VALID)).isEmpty();
         assertThat(validate(VALID.replace("21.5", "500"))).isEmpty();
-    }
-
-    @Test
-    void enforcesPatternAndMaxLength() {
-        assertThat(validate(VALID.replace("MACHINE-001", "PUMP-1")))
-                .anyMatch(e -> e.field().equals("deviceId"));
-        assertThat(validate(VALID.replace("MACHINE-001", "MACHINE-0012345")))
-                .anyMatch(e -> e.field().equals("deviceId") && e.message().contains("11"));
-    }
-
-    @Test
-    void enforcesEnum() {
-        assertThat(validate(VALID.replace("celsius", "kelvin")))
-                .contains(new FieldError("unit", "Must be one of: celsius, fahrenheit"));
-    }
-
-    @Test
-    void validatesNestedObjectsFollowingLocalRefs() {
-        List<FieldError> errors = service.validate(
-                json(SCHEMA),
-                json(
-                        """
-                {"deviceId":"MACHINE-001","temperature":1,"unit":"celsius",
-                "recordedAt":"2026-11-17T14:30:00Z",
-                 "location":{"line":"A"}}
-                """));
-        assertThat(errors).contains(new FieldError("location.site", "Missing required field"));
-    }
-
-    @Test
-    void validatesArrays() {
-        List<FieldError> errors = service.validate(
-                json(SCHEMA),
-                json(
-                        """
-                {"deviceId":"MACHINE-001","temperature":1,"unit":"celsius",
-                "recordedAt":"2026-11-17T14:30:00Z",
-                 "tags":["a","b","c"]}
-                """));
-        assertThat(errors).anyMatch(e -> e.field().equals("tags") && e.message().contains("at most 2"));
-
-        errors = service.validate(
-                json(SCHEMA),
-                json(
-                        """
-                {"deviceId":"MACHINE-001","temperature":1,"unit":"celsius",
-                "recordedAt":"2026-11-17T14:30:00Z",
-                 "tags":["a", 7]}
-                """));
-        assertThat(errors).contains(new FieldError("tags[1]", "Expected string value"));
-    }
-
-    @Test
-    void assertsDateTimeFormat() {
-        assertThat(validate(VALID.replace("2026-11-17T14:30:00Z", "yesterday")))
-                .anyMatch(e -> e.field().equals("recordedAt")
-                        && e.message().toLowerCase().contains("date-time"));
         assertThat(validate(VALID.replace("2026-11-17T14:30:00Z", "2026-11-17T14:30:00+02:00")))
                 .isEmpty();
-    }
+        assertThat(validate(VALID.replace("}\n", ",\"note\":null}\n"))).isEmpty();
 
-    @Test
-    void supportsOpenApiNullable() {
-        assertThat(
-                        service.validate(
-                                json(SCHEMA),
-                                json(
-                                        """
-                {"deviceId":"MACHINE-001","temperature":1,"unit":"celsius",
-                "recordedAt":"2026-11-17T14:30:00Z","note":null}
-                """)))
-                .isEmpty();
-    }
-
-    @Test
-    void supportsOpenApi30BooleanExclusiveMinimum() {
-        JsonNode schema = json(
+        JsonNode exclusive = json(
                 """
                 {"type":"object","properties":{"v":{"type":"number","minimum":0,"exclusiveMinimum":true}}}
                 """);
-        assertThat(service.validate(schema, json("{\"v\":0}"))).isNotEmpty();
-        assertThat(service.validate(schema, json("{\"v\":0.1}"))).isEmpty();
+        assertThat(service.validate(exclusive, json("{\"v\":0}"))).isNotEmpty();
+        assertThat(service.validate(exclusive, json("{\"v\":0.1}"))).isEmpty();
     }
 
     @Test

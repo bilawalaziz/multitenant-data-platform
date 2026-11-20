@@ -11,3 +11,6 @@ consumer/data/
 .DS_Store
 .demo-state.json
 .ruff_cache/
+
+# Personal decision log and notes (not shared)
+.scratch/

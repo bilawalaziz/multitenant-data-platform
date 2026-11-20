@@ -10,7 +10,6 @@ import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-/** Resolves the tenant's ACTIVE contract version together with its parsed mapping for ingestion. */
 @Service
 public class ContractResolver {
 

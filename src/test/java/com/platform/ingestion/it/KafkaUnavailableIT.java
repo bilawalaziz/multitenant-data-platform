@@ -8,6 +8,7 @@ import com.platform.ingestion.messaging.KafkaEventPublisher;
 import com.platform.ingestion.messaging.OutboxMessage;
 import com.platform.ingestion.messaging.OutboxProperties;
 import com.platform.ingestion.messaging.OutboxPublisher;
+import com.platform.ingestion.messaging.PlatformKafkaProperties;
 import com.platform.ingestion.messaging.PublishException;
 import com.platform.ingestion.messaging.TopicProvisioner;
 import com.platform.ingestion.observability.PlatformMetrics;
@@ -17,6 +18,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.Test;
@@ -61,7 +63,7 @@ class KafkaUnavailableIT extends AbstractIntegrationTest {
         KafkaTemplate<String, String> template = new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(config));
         TopicProvisioner topics =
                 new TopicProvisioner(Map.of("bootstrap.servers", DEAD), 3, (short) 1, Duration.ofMillis(1500));
-        return new KafkaEventPublisher(template, topics, 4000);
+        return new KafkaEventPublisher(template, topics);
     }
 
     @Test
@@ -74,8 +76,9 @@ class KafkaUnavailableIT extends AbstractIntegrationTest {
                                 "{\"event_id\":\"x\"}",
                                 "x",
                                 "tenant-offline",
-                                "1.0")))
-                .isInstanceOf(PublishException.class);
+                                "1.0"))
+                        .get(30, TimeUnit.SECONDS))
+                .hasCauseInstanceOf(PublishException.class);
         assertThat(System.currentTimeMillis() - started).isLessThan(30_000);
     }
 
@@ -105,7 +108,9 @@ class KafkaUnavailableIT extends AbstractIntegrationTest {
                 metrics,
                 tx,
                 clock,
-                new OutboxProperties(true, 1000, 50, 50, 1000, 30000, Duration.ofSeconds(30)));
+                new OutboxProperties(true, 1000, 50, 50, 1000, 30000, Duration.ofSeconds(60), Duration.ofSeconds(10)),
+                new PlatformKafkaProperties(3, (short) 1, 1500, 4000),
+                springKafka(1500));
 
         assertThat(offline.publishDue()).isZero();
 

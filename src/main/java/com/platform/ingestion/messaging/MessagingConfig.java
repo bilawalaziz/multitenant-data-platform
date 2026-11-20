@@ -21,7 +21,7 @@ public class MessagingConfig {
     @Bean
     KafkaEventPublisher kafkaEventPublisher(
             KafkaTemplate<String, String> template, TopicProvisioner topics, PlatformKafkaProperties props) {
-        return new KafkaEventPublisher(template, topics, props.sendTimeoutMs());
+        return new KafkaEventPublisher(template, topics);
     }
 
     @Bean

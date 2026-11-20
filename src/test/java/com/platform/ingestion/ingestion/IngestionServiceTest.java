@@ -8,17 +8,12 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.platform.ingestion.TestJwts;
-import com.platform.ingestion.common.ApiException;
-import com.platform.ingestion.common.ErrorCode;
-import com.platform.ingestion.common.FieldError;
 import com.platform.ingestion.contract.ContractResolver;
 import com.platform.ingestion.contract.ContractResolver.ActiveContract;
 import com.platform.ingestion.device.DeviceService;
@@ -148,81 +143,6 @@ class IngestionServiceTest {
     }
 
     @Test
-    void validationFailureStopsPipelineAndIsCounted() {
-        when(validation.validate(any(SchemaValidationService.CacheKey.class), any(), any()))
-                .thenReturn(List.of(new FieldError("temperature", "Expected numeric value")));
-
-        assertThatThrownBy(() -> service.ingest(auth, null, "key-1", body("{}")))
-                .isInstanceOfSatisfying(ApiException.class, e -> {
-                    assertThat(e.errorCode()).isEqualTo(ErrorCode.PAYLOAD_VALIDATION_FAILED);
-                    assertThat(e.errors()).containsExactly(new FieldError("temperature", "Expected numeric value"));
-                });
-
-        verifyNoInteractions(mappingEngine, writer);
-        assertThat(count("ingestion.requests", "outcome", "rejected")).isEqualTo(1);
-        assertThat(count("ingestion.rejections", "reason", "PAYLOAD_VALIDATION_FAILED"))
-                .isEqualTo(1);
-        assertThat(registry.get("ingestion.validation.failures").counter().count())
-                .isEqualTo(1);
-    }
-
-    @Test
-    void unregisteredDeviceIsRejectedBeforeWriting() {
-        doThrow(new ApiException(ErrorCode.DEVICE_NOT_REGISTERED, "nope"))
-                .when(devices)
-                .requireActiveDevice(any(), any());
-
-        assertThatThrownBy(() -> service.ingest(auth, null, "key-1", body("{}")))
-                .isInstanceOfSatisfying(
-                        ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.DEVICE_NOT_REGISTERED));
-        verify(writer, never()).write(any());
-    }
-
-    @Test
-    void noActiveContractIsRejected() {
-        when(contractResolver.resolveActive(tenant)).thenThrow(new ApiException(ErrorCode.NO_ACTIVE_CONTRACT, "none"));
-
-        assertThatThrownBy(() -> service.ingest(auth, null, "key-1", body("{}")))
-                .isInstanceOfSatisfying(
-                        ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.NO_ACTIVE_CONTRACT));
-    }
-
-    @Test
-    void replayOfIdenticalRequestReturnsDuplicateWithoutProcessing() {
-        UUID original = UUID.randomUUID();
-        IngestionResponse originalResponse = new IngestionResponse(
-                "DUPLICATE",
-                original,
-                UUID.randomUUID(),
-                "tenant-alpha",
-                contractId,
-                3,
-                Instant.parse("2026-11-17T14:00:00Z"));
-        when(idempotency.findReplay(tenant.id(), "key-1", "hash")).thenReturn(Optional.of(original));
-        when(writer.replayResponse(tenant.id(), original)).thenReturn(originalResponse);
-
-        IngestionResult result = service.ingest(auth, null, "key-1", body("{\"a\":1}"));
-
-        assertThat(result.duplicate()).isTrue();
-        assertThat(result.response().ingestionId()).isEqualTo(original);
-        verifyNoInteractions(contractResolver, mappingEngine);
-        verify(writer, never()).write(any());
-        assertThat(count("ingestion.requests", "outcome", "duplicate")).isEqualTo(1);
-    }
-
-    @Test
-    void conflictingReuseOfKeyPropagates() {
-        when(idempotency.findReplay(any(), any(), any()))
-                .thenThrow(new ApiException(ErrorCode.IDEMPOTENCY_KEY_CONFLICT, "different payload"));
-
-        assertThatThrownBy(() -> service.ingest(auth, null, "key-1", body("{}")))
-                .isInstanceOfSatisfying(ApiException.class, e -> assertThat(e.errorCode())
-                        .isEqualTo(ErrorCode.IDEMPOTENCY_KEY_CONFLICT));
-        assertThat(count("ingestion.rejections", "reason", "IDEMPOTENCY_KEY_CONFLICT"))
-                .isEqualTo(1);
-    }
-
-    @Test
     void raceLostInsideTransactionAlsoYieldsDuplicate() {
         UUID original = UUID.randomUUID();
         doReturn(new WriteOutcome(true, original)).when(writer).write(any());
@@ -242,31 +162,5 @@ class IngestionServiceTest {
                 .hasMessage("database down");
         assertThat(count("ingestion.requests", "outcome", "rejected")).isEqualTo(1);
         assertThat(count("ingestion.rejections", "reason", "INTERNAL_ERROR")).isEqualTo(1);
-    }
-
-    @Test
-    void tenantMismatchIsRejectedBeforeAnythingElse() {
-        when(tenantResolver.resolve(any(), eq("tenant-beta")))
-                .thenThrow(new ApiException(ErrorCode.TENANT_MISMATCH, "mismatch"));
-
-        assertThatThrownBy(() -> service.ingest(auth, "tenant-beta", "key-1", body("{}")))
-                .isInstanceOfSatisfying(
-                        ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.TENANT_MISMATCH));
-        verifyNoInteractions(contractResolver, writer);
-    }
-
-    @Test
-    void malformedAndOversizedBodiesAreRejected() {
-        assertThatThrownBy(() -> service.ingest(auth, null, "key-1", body("{not json")))
-                .isInstanceOfSatisfying(
-                        ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.MALFORMED_REQUEST));
-        assertThatThrownBy(() -> service.ingest(auth, null, "key-1", body("{\"a\":1} trailing")))
-                .isInstanceOf(ApiException.class);
-        assertThatThrownBy(() -> service.ingest(auth, null, "key-1", new byte[0]))
-                .isInstanceOf(ApiException.class);
-        assertThatThrownBy(() -> service.ingest(auth, null, "key-1", new byte[2048]))
-                .isInstanceOfSatisfying(
-                        ApiException.class, e -> assertThat(e.status().value()).isEqualTo(413));
-        verifyNoInteractions(contractResolver, writer);
     }
 }

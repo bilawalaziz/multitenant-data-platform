@@ -17,8 +17,6 @@ import org.hibernate.type.SqlTypes;
 @Table(name = "outbox_events")
 public class OutboxEvent extends PersistableEntity {
 
-    private static final int MAX_ERROR_LENGTH = 1000;
-
     @Id
     private UUID id;
 
@@ -71,22 +69,6 @@ public class OutboxEvent extends PersistableEntity {
         this.attempts = 0;
         this.nextAttemptAt = now;
         this.createdAt = now;
-    }
-
-    public void markPublished(Instant now) {
-        this.status = OutboxStatus.PUBLISHED;
-        this.publishedAt = now;
-        this.lastError = null;
-    }
-
-    public void markFailedAttempt(String error, Instant nextAttemptAt, boolean exhausted) {
-        this.attempts++;
-        this.lastError =
-                error == null ? "unknown error" : error.substring(0, Math.min(error.length(), MAX_ERROR_LENGTH));
-        this.nextAttemptAt = nextAttemptAt;
-        if (exhausted) {
-            this.status = OutboxStatus.FAILED;
-        }
     }
 
     /** Pushes next_attempt_at forward so other publishers skip the row while it is being published. */
