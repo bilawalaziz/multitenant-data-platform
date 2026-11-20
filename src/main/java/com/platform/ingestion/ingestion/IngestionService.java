@@ -20,6 +20,7 @@ import com.platform.ingestion.observability.MdcKeys;
 import com.platform.ingestion.observability.PlatformMetrics;
 import com.platform.ingestion.security.TenantResolver;
 import com.platform.ingestion.tenant.TenantContext;
+import com.platform.ingestion.tenant.TenantScope;
 import com.platform.ingestion.transformation.MappedFields;
 import com.platform.ingestion.transformation.MappingEngine;
 import com.platform.ingestion.validation.SchemaValidationService;
@@ -122,7 +123,13 @@ public class IngestionService {
             Authentication authentication, String tenantHint, String idempotencyKey, byte[] body) {
         TenantContext tenant = tenantResolver.resolve(authentication, tenantHint);
         MDC.put(MdcKeys.TENANT_ID, tenant.code());
+        // Opened before the first tenant-owned query and before the writer's transaction takes its connection.
+        try (TenantScope ignored = TenantScope.tenant(tenant.id())) {
+            return processInScope(tenant, idempotencyKey, body);
+        }
+    }
 
+    private IngestionResult processInScope(TenantContext tenant, String idempotencyKey, byte[] body) {
         String key = idempotency.requireValidKey(idempotencyKey);
         if (body == null || body.length == 0) {
             throw new ApiException(ErrorCode.MALFORMED_REQUEST, "Request body is empty");

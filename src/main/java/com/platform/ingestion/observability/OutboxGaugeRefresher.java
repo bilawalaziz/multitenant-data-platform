@@ -2,6 +2,7 @@ package com.platform.ingestion.observability;
 
 import com.platform.ingestion.persistence.OutboxRepository;
 import com.platform.ingestion.persistence.OutboxStatus;
+import com.platform.ingestion.tenant.TenantScope;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -22,7 +23,7 @@ public class OutboxGaugeRefresher {
 
     @Scheduled(fixedDelayString = "${platform.metrics.gauge-refresh-ms:5000}", initialDelay = 2000)
     public void refresh() {
-        try {
+        try (TenantScope ignored = TenantScope.system()) {
             metrics.updateOutboxGauges(
                     outbox.countByStatus(OutboxStatus.PENDING), outbox.countByStatus(OutboxStatus.FAILED));
         } catch (RuntimeException e) {

@@ -14,9 +14,11 @@ class DatabaseTimeoutsIT extends AbstractIntegrationTest {
     private DataSource dataSource;
 
     @Test
-    void pooledConnectionsCarryStatementAndLockTimeouts() {
-        assertThat(((HikariDataSource) dataSource).getConnectionTimeout()).isEqualTo(5000);
-        assertThat(jdbc.queryForObject("SHOW statement_timeout", String.class)).isEqualTo("15s");
-        assertThat(jdbc.queryForObject("SHOW lock_timeout", String.class)).isEqualTo("5s");
+    void pooledConnectionsCarryStatementAndLockTimeouts() throws Exception {
+        assertThat(dataSource.unwrap(HikariDataSource.class).getConnectionTimeout())
+                .isEqualTo(5000);
+        assertThat(appJdbc.queryForObject("SHOW statement_timeout", String.class))
+                .isEqualTo("15s");
+        assertThat(appJdbc.queryForObject("SHOW lock_timeout", String.class)).isEqualTo("5s");
     }
 }

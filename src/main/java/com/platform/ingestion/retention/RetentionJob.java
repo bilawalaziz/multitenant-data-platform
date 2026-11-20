@@ -1,6 +1,7 @@
 package com.platform.ingestion.retention;
 
 import com.platform.ingestion.observability.PlatformMetrics;
+import com.platform.ingestion.tenant.TenantScope;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
@@ -68,6 +69,12 @@ public class RetentionJob {
 
     /** Runs one purge pass. Idempotency rows go before ingestion records so the latter become deletable. */
     public void purge() {
+        try (TenantScope ignored = TenantScope.system()) {
+            purgeInScope();
+        }
+    }
+
+    private void purgeInScope() {
         Instant now = clock.instant();
         int outbox = deleteInBatches(DELETE_OUTBOX, now.minus(props.outboxPublished()));
         int idempotency = deleteInBatches(DELETE_IDEMPOTENCY, now.minus(props.idempotency()));
