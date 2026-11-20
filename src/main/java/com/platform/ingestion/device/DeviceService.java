@@ -83,7 +83,7 @@ public class DeviceService {
                 return devices.saveAndFlush(device);
             });
         } catch (RuntimeException e) {
-            removeClient(credential.clientId());
+            removeClientIfUnreferenced(credential.clientId());
             if (e instanceof DataIntegrityViolationException) {
                 // A concurrent registration of the same device won the unique constraint.
                 throw conflict(deviceId);
@@ -123,8 +123,20 @@ public class DeviceService {
         }
         String existingClient = device.getCredentialClientId();
         if (existingClient != null) {
-            String secret = provision(() -> provisioner.rotateSecret(existingClient));
-            return new DeviceCredentialsResponse(deviceId, existingClient, secret);
+            return provision(() -> {
+                try {
+                    return new DeviceCredentialsResponse(
+                            deviceId, existingClient, provisioner.rotateSecret(existingClient));
+                } catch (CredentialProvisioningException e) {
+                    if (e.reason() != Reason.NOT_FOUND) {
+                        throw e;
+                    }
+                    // The client was removed outside the platform (for example by an operator); recreate it.
+                    log.warn("Client {} of device {} is missing and is being recreated", existingClient, deviceId);
+                    DeviceCredential recreated = createCredential(tenantCode, deviceId);
+                    return new DeviceCredentialsResponse(deviceId, recreated.clientId(), recreated.clientSecret());
+                }
+            });
         }
         DeviceCredential credential = provision(() -> createCredential(tenantCode, deviceId));
         try {
@@ -138,7 +150,7 @@ public class DeviceService {
                 devices.saveAndFlush(current);
             });
         } catch (RuntimeException e) {
-            removeClient(credential.clientId());
+            removeClientIfUnreferenced(credential.clientId());
             throw e;
         }
         return new DeviceCredentialsResponse(deviceId, credential.clientId(), credential.clientSecret());
@@ -214,8 +226,15 @@ public class DeviceService {
         }
     }
 
-    private void removeClient(String clientId) {
+    /**
+     * The client id is derived from tenant and device, so when another request (possibly on another instance) won
+     * the race for this device, the client we see is the winner's and must stay.
+     */
+    private void removeClientIfUnreferenced(String clientId) {
         try {
+            if (devices.existsByCredentialClientId(clientId)) {
+                return;
+            }
             provisioner.delete(clientId);
         } catch (RuntimeException e) {
             // The original failure is what the caller needs to see; the leftover client is named for clean-up.

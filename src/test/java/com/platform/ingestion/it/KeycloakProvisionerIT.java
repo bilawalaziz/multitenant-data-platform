@@ -252,27 +252,72 @@ class KeycloakProvisionerIT {
                 .get("access_token")
                 .asText();
         String userId = claims(token).get("sub").asText();
+        String attack = "{\"username\":\"service-account-" + credential.clientId()
+                + "\",\"attributes\":{\"tenant_id\":[\"tenant-beta\"],\"device_id\":[\"OTHER\"]}}";
 
-        // Neither the account API nor the admin API accepts the device token (no account or admin audience).
-        for (String url : List.of(
-                baseUrl + "/realms/" + REALM + "/account/", baseUrl + "/admin/realms/" + REALM + "/users/" + userId)) {
-            HttpRequest request = HttpRequest.newBuilder(URI.create(url))
-                    .header("Authorization", "Bearer " + token)
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString("{\"attributes\":{\"tenant_id\":[\"tenant-beta\"]}}"))
-                    .build();
-            int status = HttpClient.newHttpClient()
-                    .send(request, HttpResponse.BodyHandlers.ofString())
-                    .statusCode();
-            assertThat(status).isIn(401, 403, 404, 405);
-        }
-        // The claims in a fresh token are unchanged.
-        JsonNode fresh = claims(clientCredentials(credential.clientId(), credential.clientSecret())
-                .body()
+        // The account API's profile update and the admin API's user update, both with the device's own token.
+        send("POST", baseUrl + "/realms/" + REALM + "/account/", token, attack);
+        send("PUT", baseUrl + "/admin/realms/" + REALM + "/users/" + userId, token, attack);
+
+        // Whatever the status codes, the stored attributes are what proves nothing changed.
+        HttpRequest login = HttpRequest.newBuilder(URI.create(baseUrl + "/realms/master/protocol/openid-connect/token"))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .POST(HttpRequest.BodyPublishers.ofString(
+                        "grant_type=password&client_id=admin-cli&username=admin&password=admin-it-pw"))
+                .build();
+        String adminToken = JSON.readTree(HttpClient.newHttpClient()
+                        .send(login, HttpResponse.BodyHandlers.ofString())
+                        .body())
                 .get("access_token")
-                .asText());
-        assertThat(fresh.get("tenant_id").asText()).isEqualTo("tenant-alpha");
-        assertThat(fresh.get("device_id").asText()).isEqualTo(device);
+                .asText();
+        HttpRequest read = HttpRequest.newBuilder(URI.create(baseUrl + "/admin/realms/" + REALM + "/users/" + userId))
+                .header("Authorization", "Bearer " + adminToken)
+                .build();
+        JsonNode user = JSON.readTree(HttpClient.newHttpClient()
+                .send(read, HttpResponse.BodyHandlers.ofString())
+                .body());
+        assertThat(user.get("attributes").get("tenant_id").get(0).asText()).isEqualTo("tenant-alpha");
+        assertThat(user.get("attributes").get("device_id").get(0).asText()).isEqualTo(device);
+    }
+
+    private static int send(String method, String url, String token, String json) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+                .header("Authorization", "Bearer " + token)
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .method(method, HttpRequest.BodyPublishers.ofString(json))
+                .build();
+        return HttpClient.newHttpClient()
+                .send(request, HttpResponse.BodyHandlers.ofString())
+                .statusCode();
+    }
+
+    @Test
+    void existingDemoClientsAndUsersKeepTheirTokenShape() throws Exception {
+        // tenant-wide ingestion client used by the demo and the README
+        TokenReply alpha = clientCredentials("tenant-alpha-ingest", "alpha-it-secret");
+        assertThat(alpha.status()).isEqualTo(200);
+        JsonNode ingest = claims(alpha.body().get("access_token").asText());
+        assertThat(ingest.get("aud").toString()).contains("sensor-platform-api");
+        assertThat(ingest.get("tenant_id").asText()).isEqualTo("tenant-alpha");
+        assertThat(ingest.get("realm_access").get("roles").toString()).contains("tenant-ingest");
+        assertThat(ingest.has("device_id")).isFalse();
+
+        // demo users through platform-cli, as scripts/get-token.sh does
+        JsonNode admin = claims(passwordToken("platform-admin"));
+        assertThat(admin.get("realm_access").get("roles").toString()).contains("platform-admin");
+        assertThat(admin.get("aud").toString()).contains("sensor-platform-api");
+        JsonNode tenantAdmin = claims(passwordToken("alpha-admin"));
+        assertThat(tenantAdmin.get("realm_access").get("roles").toString()).contains("tenant-admin");
+        assertThat(tenantAdmin.get("tenant_id").asText()).isEqualTo("tenant-alpha");
+        assertThat(tenantAdmin.get("aud").toString()).contains("sensor-platform-api");
+    }
+
+    private static String passwordToken(String user) throws Exception {
+        TokenReply reply = tokenRequest(
+                "grant_type=password&client_id=platform-cli&username=" + enc(user) + "&password=demo-it-pw");
+        assertThat(reply.status()).isEqualTo(200);
+        return reply.body().get("access_token").asText();
     }
 
     @Test

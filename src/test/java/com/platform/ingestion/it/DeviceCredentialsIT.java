@@ -223,6 +223,43 @@ class DeviceCredentialsIT extends AbstractIntegrationTest {
     }
 
     @Test
+    void lostRegistrationRaceLeavesTheWinnersClientAlone() throws Exception {
+        String device = uniqueDevice();
+        String clientId = DeviceClientIds.forDevice(TENANT, device);
+        // The other instance's row, naming the client, commits between our client creation and our insert.
+        provisioner.setAfterCreate(() -> jdbc.update(
+                "INSERT INTO platform.devices (id, tenant_id, device_id, status, created_at, credential_client_id) "
+                        + "VALUES (?, ?, ?, 'ACTIVE', now(), ?)",
+                UUID.randomUUID(),
+                tenantId,
+                device,
+                clientId));
+
+        mvc.perform(post("/api/v1/tenants/" + TENANT + "/devices")
+                        .header("Authorization", bearer(tenantAdmin(TENANT)))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"deviceId\":\"" + device + "\"}"))
+                .andExpect(status().isConflict());
+
+        assertThat(provisioner.clients).containsKey(clientId);
+        assertThat(provisioner.deleted).doesNotContain(clientId);
+    }
+
+    @Test
+    void credentialRequestRecreatesAClientThatWasRemovedOutsideThePlatform() throws Exception {
+        String device = uniqueDevice();
+        String clientId = register(device).get("clientId").asText();
+        provisioner.clients.remove(clientId);
+
+        JsonNode reissued = issue(device);
+
+        assertThat(reissued.get("clientId").asText()).isEqualTo(clientId);
+        assertThat(provisioner.clients.get(clientId).secret())
+                .isEqualTo(reissued.get("clientSecret").asText());
+        assertThat(provisioner.clients.get(clientId).enabled()).isTrue();
+    }
+
+    @Test
     void orphanedClientDoesNotBlockRegistrationOrCredentialIssue() throws Exception {
         String device = uniqueDevice();
         String orphan = DeviceClientIds.forDevice(TENANT, device);
