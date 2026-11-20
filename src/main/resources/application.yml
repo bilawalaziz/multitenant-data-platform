@@ -11,6 +11,11 @@ spring:
     password: ${DB_PASSWORD:sensor_dev_pw}
     hikari:
       maximum-pool-size: 10
+  task:
+    scheduling:
+      pool:
+        # outbox publisher, gauge refresher and retention job must not queue behind each other
+        size: 3
   jpa:
     open-in-view: false
     hibernate:
@@ -67,7 +72,16 @@ platform:
     max-attempts: 50
     backoff-base-ms: 1000
     backoff-cap-ms: 30000
-    lease: 30s
+    lease: 60s
+    issue-deadline: 10s
+  retention:
+    enabled: true
+    fixed-delay: PT1H
+    outbox-published: 7d
+    idempotency: 7d
+    ingestion-records: 90d
+    batch-size: 1000
+    max-batches-per-run: 100
 
 management:
   endpoints:

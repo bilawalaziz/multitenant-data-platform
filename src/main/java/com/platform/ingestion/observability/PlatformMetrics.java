@@ -4,7 +4,10 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 import org.springframework.stereotype.Component;
 
 /**
@@ -22,6 +25,7 @@ public class PlatformMetrics {
     private final Counter validationFailures;
     private final Counter publishSuccess;
     private final Counter publishFailure;
+    private final Map<String, Counter> retentionDeleted;
     private final Timer processing;
     private final AtomicLong pendingEvents = new AtomicLong();
     private final AtomicLong failedEvents = new AtomicLong();
@@ -51,6 +55,11 @@ public class PlatformMetrics {
                 .tag("result", "failure")
                 .description("Outbox publish attempts")
                 .register(registry);
+        this.retentionDeleted = List.of("outbox_events", "idempotency_records", "ingestion_records").stream()
+                .collect(Collectors.toMap(table -> table, table -> Counter.builder("retention.deleted")
+                        .tag("table", table)
+                        .description("Rows purged by the retention job")
+                        .register(registry)));
         this.processing = Timer.builder("ingestion.processing")
                 .description("End-to-end ingestion processing time")
                 .publishPercentileHistogram()
@@ -98,6 +107,11 @@ public class PlatformMetrics {
 
     public void outboxPublishFailed() {
         publishFailure.increment();
+    }
+
+    /** @param table one of outbox_events, idempotency_records, ingestion_records. */
+    public void retentionDeleted(String table, int count) {
+        retentionDeleted.get(table).increment(count);
     }
 
     public void updateOutboxGauges(long pending, long failed) {

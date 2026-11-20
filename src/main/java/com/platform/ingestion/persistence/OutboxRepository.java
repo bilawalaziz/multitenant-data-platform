@@ -24,12 +24,12 @@ public interface OutboxRepository extends JpaRepository<OutboxEvent, UUID> {
             nativeQuery = true)
     List<OutboxEvent> claimDue(@Param("now") Instant now, @Param("limit") int limit);
 
-    /** Marks a row published, only if it is still PENDING. @return rows updated (0 or 1). */
+    /** Marks rows published, only those still PENDING. @return rows updated. */
     @Modifying
     @Query("update OutboxEvent o set o.status = com.platform.ingestion.persistence.OutboxStatus.PUBLISHED, "
             + "o.publishedAt = :now, o.lastError = null "
-            + "where o.id = :id and o.status = com.platform.ingestion.persistence.OutboxStatus.PENDING")
-    int markPublished(@Param("id") UUID id, @Param("now") Instant now);
+            + "where o.id in :ids and o.status = com.platform.ingestion.persistence.OutboxStatus.PENDING")
+    int markPublishedAll(@Param("ids") Collection<UUID> ids, @Param("now") Instant now);
 
     /** Records a failed attempt, only if the row is still PENDING. @return rows updated (0 or 1). */
     @Modifying
@@ -42,7 +42,7 @@ public interface OutboxRepository extends JpaRepository<OutboxEvent, UUID> {
             @Param("next") Instant next,
             @Param("newStatus") OutboxStatus newStatus);
 
-    /** Makes still-leased PENDING rows due again at {@code at} (releases the rest of a failed batch). */
+    /** Makes still-leased PENDING rows due again at {@code at} (rows that were claimed but not sent). */
     @Modifying
     @Query("update OutboxEvent o set o.nextAttemptAt = :at "
             + "where o.id in :ids and o.status = com.platform.ingestion.persistence.OutboxStatus.PENDING "
