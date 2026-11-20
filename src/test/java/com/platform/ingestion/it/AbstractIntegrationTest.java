@@ -19,6 +19,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -120,6 +121,13 @@ public abstract class AbstractIntegrationTest {
                 createdAt)));
         outboxFixtures.add(eventId);
         return eventId;
+    }
+
+    /** Spring Kafka properties with the producer max.block.ms the publisher takes into account. */
+    protected static KafkaProperties springKafka(int maxBlockMs) {
+        KafkaProperties kafka = new KafkaProperties();
+        kafka.getProducer().getProperties().put("max.block.ms", String.valueOf(maxBlockMs));
+        return kafka;
     }
 
     protected static String bearer(String token) {

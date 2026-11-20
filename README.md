@@ -304,7 +304,7 @@ returned only after commit. `OutboxPublisher` then works in three steps, none of
 row lock while talking to Kafka:
 
 1. Claim: in a short transaction it selects due PENDING rows with `FOR UPDATE SKIP LOCKED` and pushes their
-   `next_attempt_at` to now plus `platform.outbox.lease` (default 30 s). Other instances skip them because they are no
+   `next_attempt_at` to now plus `platform.outbox.lease` (default 60 s). Other instances skip them because they are no
    longer due.
 2. Publish: rows are sent in order and synchronously. The batch stops at the first failure, since the broker is likely
    down, and the remaining claimed rows are released to the failed row's backoff time.

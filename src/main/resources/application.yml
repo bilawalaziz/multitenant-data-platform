@@ -14,8 +14,8 @@ spring:
   task:
     scheduling:
       pool:
-        # the outbox publisher and the periodic jobs must not queue behind each other
-        size: 2
+        # outbox publisher, gauge refresher and retention job must not queue behind each other
+        size: 3
   jpa:
     open-in-view: false
     hibernate:
@@ -72,7 +72,7 @@ platform:
     max-attempts: 50
     backoff-base-ms: 1000
     backoff-cap-ms: 30000
-    lease: 30s
+    lease: 60s
     issue-deadline: 10s
   retention:
     enabled: true

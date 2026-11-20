@@ -1,3 +1,10 @@
+-- The application limits statement_timeout on every connection, Flyway included. Lift it for this migration only
+-- (SET LOCAL ends with the migration transaction, so nothing leaks into the pool).
+SET LOCAL statement_timeout = 0;
+
+-- On a large live table build these indexes with CREATE INDEX CONCURRENTLY instead, outside a transaction
+-- (Flyway executeInTransaction=false), so writes are not blocked while they are created.
+
 -- Support the retention job: each predicate below is range-scanned per batch instead of scanning the table.
 
 -- Only PUBLISHED rows are purged, so the index stays small while PENDING/FAILED rows are never in it.

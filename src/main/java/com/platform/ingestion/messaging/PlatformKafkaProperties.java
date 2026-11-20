@@ -8,4 +8,4 @@ public record PlatformKafkaProperties(
         @DefaultValue("3") int topicPartitions,
         @DefaultValue("1") short topicReplicationFactor,
         @DefaultValue("5000") long adminTimeoutMs,
-        @DefaultValue("20000") long sendTimeoutMs) {}
+        @DefaultValue("12000") long sendTimeoutMs) {}

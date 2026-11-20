@@ -20,6 +20,7 @@ import java.util.concurrent.TimeoutException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
+import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -83,7 +84,8 @@ public class OutboxPublisher {
             TransactionTemplate tx,
             Clock clock,
             OutboxProperties props,
-            PlatformKafkaProperties kafkaProps) {
+            PlatformKafkaProperties kafkaProps,
+            KafkaProperties springKafka) {
         this.outbox = outbox;
         this.publisher = publisher;
         this.backoff = backoff;
@@ -92,11 +94,21 @@ public class OutboxPublisher {
         this.clock = clock;
         this.props = props;
         this.sendTimeout = Duration.ofMillis(kafkaProps.sendTimeoutMs());
-        if (props.issueDeadline().plus(sendTimeout).compareTo(props.lease()) >= 0) {
+        // One send can still block after the deadline check: topic provisioning plus the producer metadata wait
+        Duration maxSendBlock = Duration.ofMillis(kafkaProps.adminTimeoutMs()).plus(producerMaxBlock(springKafka));
+        if (props.issueDeadline().plus(maxSendBlock).plus(sendTimeout).compareTo(props.lease()) >= 0) {
             throw new IllegalStateException("platform.outbox.lease (" + props.lease()
                     + ") must be longer than platform.outbox.issue-deadline (" + props.issueDeadline()
-                    + ") plus platform.kafka.send-timeout-ms (" + sendTimeout + ")");
+                    + ") plus the longest blocking send (" + maxSendBlock
+                    + ": platform.kafka.admin-timeout-ms plus producer max.block.ms) plus platform.kafka.send-timeout-ms ("
+                    + sendTimeout + ")");
         }
+    }
+
+    private static Duration producerMaxBlock(KafkaProperties springKafka) {
+        String configured = springKafka.getProducer().getProperties().get("max.block.ms");
+        // Kafka's own default when the application does not set it
+        return Duration.ofMillis(configured == null ? 60_000 : Long.parseLong(configured.trim()));
     }
 
     /** @return number of rows published in this run. */
@@ -140,7 +152,9 @@ public class OutboxPublisher {
         }
 
         List<UUID> publishedIds = new ArrayList<>();
-        awaitAll(inFlight, publishedIds, failures);
+        List<Claim> unfinished = new ArrayList<>();
+        awaitAll(inFlight, publishedIds, failures, unfinished);
+        unissued.addAll(unfinished);
         if (!unissued.isEmpty()) {
             log.warn("Outbox issue deadline reached, releasing {} unsent rows", unissued.size());
         }
@@ -177,9 +191,15 @@ public class OutboxPublisher {
     }
 
     /** Waits for every issued send, together at most the send timeout, and sorts the rows by outcome. */
-    private void awaitAll(List<InFlight> inFlight, List<UUID> published, List<Failure> failures) {
+    private void awaitAll(
+            List<InFlight> inFlight, List<UUID> published, List<Failure> failures, List<Claim> unfinished) {
         Instant giveUp = clock.instant().plus(sendTimeout);
+        boolean interrupted = false;
         for (InFlight sent : inFlight) {
+            if (interrupted) {
+                settleWithoutWaiting(sent, published, failures, unfinished);
+                continue;
+            }
             long remainingMs =
                     Math.max(Duration.between(clock.instant(), giveUp).toMillis(), 0);
             try {
@@ -191,9 +211,22 @@ public class OutboxPublisher {
             } catch (TimeoutException e) {
                 failures.add(failure(sent.claim(), "Kafka publish timed out after " + sendTimeout.toMillis() + " ms"));
             } catch (InterruptedException e) {
+                // stop waiting; rows still in flight are released without charging an attempt
                 Thread.currentThread().interrupt();
-                failures.add(failure(sent.claim(), "Interrupted while publishing"));
+                interrupted = true;
+                settleWithoutWaiting(sent, published, failures, unfinished);
             }
+        }
+    }
+
+    private void settleWithoutWaiting(
+            InFlight sent, List<UUID> published, List<Failure> failures, List<Claim> unfinished) {
+        if (!sent.future().isDone()) {
+            unfinished.add(sent.claim());
+        } else if (sent.future().isCompletedExceptionally()) {
+            failures.add(failure(sent.claim(), describe(sent.future())));
+        } else {
+            published.add(sent.claim().id());
         }
     }
 

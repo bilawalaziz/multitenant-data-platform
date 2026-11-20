@@ -1,7 +1,6 @@
 package com.platform.ingestion.it;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.platform.ingestion.messaging.BackoffPolicy;
 import com.platform.ingestion.messaging.OutboxProperties;
@@ -113,8 +112,9 @@ class OutboxBatchIT extends AbstractIntegrationTest {
                 metrics,
                 tx,
                 clock,
-                new OutboxProperties(true, 1000, 50, 50, 1000, 30000, Duration.ofSeconds(30), Duration.ofSeconds(10)),
-                new PlatformKafkaProperties(3, (short) 1, 5000, 5000));
+                new OutboxProperties(true, 1000, 50, 50, 1000, 30000, Duration.ofSeconds(60), Duration.ofSeconds(10)),
+                new PlatformKafkaProperties(3, (short) 1, 5000, 5000),
+                springKafka(5000));
         List<String> sent = new ArrayList<>();
         // sending the second row takes "longer" than the issue deadline
         toggling.setSender(message -> {
@@ -135,26 +135,60 @@ class OutboxBatchIT extends AbstractIntegrationTest {
             Map<String, Object> released = row(events.get(i));
             assertThat(released.get("status")).isEqualTo("PENDING");
             assertThat(((Number) released.get("attempts")).intValue()).isZero();
-            // due again now, not held until the 30 s lease the claim set
+            // due again now, not held until the 60 s lease the claim set
             assertThat(((Timestamp) released.get("next_attempt_at")).toInstant())
                     .isBefore(clock.instant().plusMillis(1));
         }
     }
 
     @Test
-    void leaseMustOutlastIssueDeadlinePlusSendTimeout() {
-        assertThatThrownBy(() -> new OutboxPublisher(
-                        outboxRepository,
-                        toggling,
-                        new BackoffPolicy(Duration.ofSeconds(1), Duration.ofSeconds(30)),
-                        metrics,
-                        tx,
-                        Clock.systemUTC(),
-                        new OutboxProperties(
-                                true, 1000, 50, 50, 1000, 30000, Duration.ofSeconds(30), Duration.ofSeconds(20)),
-                        new PlatformKafkaProperties(3, (short) 1, 5000, 12000)))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("lease");
+    void sendsThatFailOrNeverCompleteAfterIssueChargeAnAttemptAndLeaveTheRestPublished() throws Exception {
+        drainOutbox();
+        Instant base = Instant.now().minusSeconds(30);
+        List<UUID> events = new ArrayList<>();
+        for (int i = 0; i < 4; i++) {
+            events.add(newOutboxRow(TENANT_B, "DEV-F" + i, base.plusSeconds(i)));
+        }
+        OutboxPublisher publisher = new OutboxPublisher(
+                outboxRepository,
+                toggling,
+                new BackoffPolicy(Duration.ofSeconds(1), Duration.ofSeconds(30)),
+                metrics,
+                tx,
+                Clock.systemUTC(),
+                new OutboxProperties(true, 1000, 50, 50, 1000, 30000, Duration.ofSeconds(60), Duration.ofSeconds(10)),
+                new PlatformKafkaProperties(3, (short) 1, 1500, 1500),
+                springKafka(5000));
+        List<UUID> order = new ArrayList<>(events);
+        CompletableFuture<Void> brokerRejection = new CompletableFuture<>();
+        // the broker rejects the second record only after all four were issued, so it is not an immediate failure
+        toggling.setSender(message -> {
+            int index = order.indexOf(UUID.fromString(message.eventId()));
+            if (index == 3) {
+                brokerRejection.completeExceptionally(new PublishException("broker rejected record", null));
+            }
+            return switch (index) {
+                case 1 -> brokerRejection;
+                case 2 -> new CompletableFuture<>(); // never acknowledged
+                default -> CompletableFuture.completedFuture(null);
+            };
+        });
+
+        assertThat(publisher.publishDue()).isEqualTo(2);
+
+        assertThat(row(events.get(0)).get("status")).isEqualTo("PUBLISHED");
+        assertThat(row(events.get(3)).get("status")).isEqualTo("PUBLISHED");
+        Map<String, Object> rejected = row(events.get(1));
+        Map<String, Object> unacknowledged = row(events.get(2));
+        assertThat((String) rejected.get("last_error")).contains("broker rejected record");
+        assertThat((String) unacknowledged.get("last_error")).contains("timed out");
+        for (Map<String, Object> failed : List.of(rejected, unacknowledged)) {
+            assertThat(failed.get("status")).isEqualTo("PENDING");
+            assertThat(((Number) failed.get("attempts")).intValue()).isEqualTo(1);
+            // short backoff after the failure, not the 60 s lease the claim set
+            assertThat(((Timestamp) failed.get("next_attempt_at")).toInstant())
+                    .isBefore(Instant.now().plusSeconds(10));
+        }
     }
 
     /** Clock whose time only moves when the test says so. */
