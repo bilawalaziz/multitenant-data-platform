@@ -1,7 +1,9 @@
 package com.platform.ingestion.device;
 
 import com.platform.ingestion.device.DeviceDtos.CreateDeviceRequest;
+import com.platform.ingestion.device.DeviceDtos.DeviceCredentialsResponse;
 import com.platform.ingestion.device.DeviceDtos.DeviceResponse;
+import com.platform.ingestion.device.DeviceDtos.RegisteredDeviceResponse;
 import jakarta.validation.Valid;
 import java.util.List;
 import org.springframework.http.HttpStatus;
@@ -24,7 +26,7 @@ public class DeviceController {
     }
 
     @PostMapping
-    public ResponseEntity<DeviceResponse> register(
+    public ResponseEntity<RegisteredDeviceResponse> register(
             @PathVariable String tenantId, @Valid @RequestBody CreateDeviceRequest request) {
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(deviceService.register(tenantId, request.deviceId(), request.description()));
@@ -33,5 +35,16 @@ public class DeviceController {
     @GetMapping
     public List<DeviceResponse> list(@PathVariable String tenantId) {
         return deviceService.list(tenantId);
+    }
+
+    /** Creates the client of a device registered before credentials existed, otherwise replaces its secret. */
+    @PostMapping("/{deviceId}/credentials")
+    public DeviceCredentialsResponse issueCredentials(@PathVariable String tenantId, @PathVariable String deviceId) {
+        return deviceService.issueCredentials(tenantId, deviceId);
+    }
+
+    @PostMapping("/{deviceId}/deactivate")
+    public DeviceResponse deactivate(@PathVariable String tenantId, @PathVariable String deviceId) {
+        return deviceService.deactivate(tenantId, deviceId);
     }
 }

@@ -69,6 +69,15 @@ spring:
 platform:
   security:
     audience: sensor-platform-api
+    # Tenant-wide ingestion clients (no device_id claim) are accepted until every device has its own credential.
+    tenant-ingest-credentials-enabled: true
+  keycloak:
+    provisioner:
+      # Keycloak as reachable from the application; the client creates and manages one client per device.
+      url: ${KEYCLOAK_ADMIN_URL:http://localhost:8180}
+      realm: sensor-platform
+      client-id: ${PROVISIONER_CLIENT_ID:sensor-platform-provisioner}
+      client-secret: ${PROVISIONER_CLIENT_SECRET:}
   ingestion:
     max-payload-bytes: 65536
   kafka:
@@ -144,6 +153,14 @@ spring:
         jwt:
           issuer-uri: ${KEYCLOAK_ISSUER_URI}
           jwk-set-uri: ${KEYCLOAK_JWK_SET_URI}
+platform:
+  security:
+    tenant-ingest-credentials-enabled: false
+  keycloak:
+    provisioner:
+      url: ${KEYCLOAK_ADMIN_URL}
+      client-id: ${PROVISIONER_CLIENT_ID}
+      client-secret: ${PROVISIONER_CLIENT_SECRET}
 logging:
   structured:
     format:

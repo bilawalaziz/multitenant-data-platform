@@ -77,6 +77,26 @@
       ]
     },
     {
+      "clientId": "sensor-platform-provisioner",
+      "name": "Device credential provisioner",
+      "description": "Used by the platform to create and manage per-device clients; it holds no API roles and no audience, so it cannot call the platform API.",
+      "enabled": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${PROVISIONER_CLIENT_SECRET}",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocol": "openid-connect",
+      "fullScopeAllowed": true,
+      "defaultClientScopes": [
+        "kc-admin-api",
+        "roles",
+        "basic"
+      ]
+    },
+    {
       "clientId": "tenant-alpha-ingest",
       "name": "Tenant alpha ingestion client",
       "enabled": true,
@@ -228,6 +248,18 @@
       "attributes": {
         "tenant_id": [
           "tenant-beta"
+        ]
+      }
+    },
+    {
+      "username": "service-account-sensor-platform-provisioner",
+      "enabled": true,
+      "serviceAccountClientId": "sensor-platform-provisioner",
+      "clientRoles": {
+        "realm-management": [
+          "manage-clients",
+          "manage-realm",
+          "manage-users"
         ]
       }
     },

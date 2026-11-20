@@ -33,6 +33,9 @@ public class Device extends PersistableEntity {
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
+    @Column(name = "credential_client_id")
+    private String credentialClientId;
+
     protected Device() {}
 
     public Device(UUID id, UUID tenantId, String deviceId, String description, DeviceStatus status, Instant createdAt) {
@@ -67,5 +70,17 @@ public class Device extends PersistableEntity {
 
     public Instant getCreatedAt() {
         return createdAt;
+    }
+
+    public String getCredentialClientId() {
+        return credentialClientId;
+    }
+
+    public void assignCredentialClient(String clientId) {
+        this.credentialClientId = clientId;
+    }
+
+    public void deactivate() {
+        this.status = DeviceStatus.INACTIVE;
     }
 }
