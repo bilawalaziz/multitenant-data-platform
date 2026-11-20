@@ -42,6 +42,13 @@ spring:
     password: ${DB_MIGRATION_PASSWORD:sensor_dev_pw}
     placeholders:
       app_role: ${DB_USER:sensor_app}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      # Bounds how long a rate limit check can delay a request when Redis is slow or unreachable.
+      timeout: 200ms
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9094}
     producer:
@@ -80,6 +87,23 @@ platform:
       client-secret: ${PROVISIONER_CLIENT_SECRET:}
   ingestion:
     max-payload-bytes: 65536
+  rate-limit:
+    enabled: true
+    # After a Redis failure, admit requests without limiting for this long before trying Redis again.
+    failure-cooldown: 2s
+    # Token buckets: capacity is the burst, refill-per-second the sustained rate. A device is expected to
+    # report every few seconds; a tenant's budget is sized to what the database pool can absorb.
+    tenant:
+      capacity: 400
+      refill-per-second: 200
+    device:
+      capacity: 20
+      refill-per-second: 10
+    # Per tenant code, for example:
+    # tenant-overrides:
+    #   tenant-alpha:
+    #     capacity: 1000
+    #     refill-per-second: 500
   kafka:
     topic-partitions: 3
     topic-replication-factor: 1
@@ -104,6 +128,10 @@ platform:
     max-batches-per-run: 100
 
 management:
+  health:
+    # Rate limiting fails open, so Redis must not turn the application's health (and its container) red.
+    redis:
+      enabled: false
   server:
     # Actuator is not served on the API port; keep this port internal to the deployment network.
     port: ${MANAGEMENT_PORT:8081}
@@ -145,6 +173,11 @@ spring:
   flyway:
     user: ${DB_MIGRATION_USER}
     password: ${DB_MIGRATION_PASSWORD}
+  data:
+    redis:
+      host: ${REDIS_HOST}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD}
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS}
   security:

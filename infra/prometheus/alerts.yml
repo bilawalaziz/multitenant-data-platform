@@ -62,3 +62,12 @@ groups:
           severity: warning
         annotations:
           summary: "p95 ingestion processing time has been above 500 ms for 10 minutes"
+
+      - alert: RateLimiterDegraded
+        # Rate limiting fails open when Redis is unreachable, so ingestion keeps working but is no longer limited.
+        expr: sum(rate(ratelimit_errors_total[5m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rate limiting is failing open because the limiter store is unavailable"
