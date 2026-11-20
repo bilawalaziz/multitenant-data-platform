@@ -7,10 +7,7 @@ import jakarta.persistence.Transient;
 import java.util.UUID;
 import org.springframework.data.domain.Persistable;
 
-/**
- * Base for entities with application-assigned UUIDs. Marks instances as "new" until persisted so
- * Spring Data issues an INSERT instead of a SELECT + merge.
- */
+/** Entity with an application-assigned id; treated as new until persisted, so Spring Data inserts without a SELECT. */
 @MappedSuperclass
 public abstract class PersistableEntity implements Persistable<UUID> {
 

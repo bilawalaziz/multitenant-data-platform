@@ -7,10 +7,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-/**
- * Checks that a {@link PathExpression} can address something in a (self-contained) JSON schema document by
- * walking properties and items, following local {@code #/...} references and allOf/oneOf/anyOf branches.
- */
 final class SchemaPathResolver {
 
     private SchemaPathResolver() {}

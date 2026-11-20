@@ -11,7 +11,6 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.AbstractOAuth2TokenAuthenticationToken;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 
-/** Maps Keycloak {@code realm_access.roles} to the platform's ROLE_* authorities. Unknown roles are ignored. */
 public class KeycloakJwtAuthenticationConverter implements Converter<Jwt, AbstractOAuth2TokenAuthenticationToken<Jwt>> {
 
     private static final Map<String, String> ROLE_MAPPING = Map.of(

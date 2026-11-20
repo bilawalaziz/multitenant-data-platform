@@ -7,7 +7,6 @@ import java.nio.charset.StandardCharsets;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 
-/** Writes the standard error body for responses produced outside Spring MVC (security filters). */
 @Component
 public class ErrorResponseWriter {
 

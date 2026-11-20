@@ -10,11 +10,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Component;
 
-/**
- * Resolves the calling tenant from the verified token. The {@code tenant_id} claim is authoritative;
- * the optional X-Tenant-ID header is only a hint and must agree with it. The tenant must exist and be
- * ACTIVE in the platform's own records (trusted source), never be inferred from request data.
- */
+/** The token claim is authoritative; the X-Tenant-ID header is only a hint and must agree with it. */
 @Component
 public class TenantResolver {
 

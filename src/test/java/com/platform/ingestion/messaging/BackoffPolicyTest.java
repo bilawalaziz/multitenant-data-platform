@@ -5,30 +5,17 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 class BackoffPolicyTest {
 
     private final BackoffPolicy policy = new BackoffPolicy(Duration.ofSeconds(1), Duration.ofSeconds(30));
 
-    @Test
-    void growsExponentiallyFromBase() {
-        assertThat(policy.delay(1)).isEqualTo(Duration.ofSeconds(1));
-        assertThat(policy.delay(2)).isEqualTo(Duration.ofSeconds(2));
-        assertThat(policy.delay(3)).isEqualTo(Duration.ofSeconds(4));
-        assertThat(policy.delay(5)).isEqualTo(Duration.ofSeconds(16));
-    }
-
-    @Test
-    void isCappedAndNeverOverflows() {
-        assertThat(policy.delay(6)).isEqualTo(Duration.ofSeconds(30));
-        assertThat(policy.delay(50)).isEqualTo(Duration.ofSeconds(30));
-        assertThat(policy.delay(Integer.MAX_VALUE)).isEqualTo(Duration.ofSeconds(30));
-    }
-
-    @Test
-    void attemptZeroOrNegativeUsesBase() {
-        assertThat(policy.delay(0)).isEqualTo(Duration.ofSeconds(1));
-        assertThat(policy.delay(-3)).isEqualTo(Duration.ofSeconds(1));
+    @ParameterizedTest(name = "attempt {0} waits {1}s")
+    @CsvSource({"-3,1", "0,1", "1,1", "2,2", "3,4", "5,16", "6,30", "50,30", "2147483647,30"})
+    void growsExponentiallyFromBaseAndIsCapped(int attempt, long seconds) {
+        assertThat(policy.delay(attempt)).isEqualTo(Duration.ofSeconds(seconds));
     }
 
     @Test

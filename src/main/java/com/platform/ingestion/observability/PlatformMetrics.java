@@ -10,11 +10,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import org.springframework.stereotype.Component;
 
-/**
- * All custom metrics in one place. Names use dots so the Prometheus registry renders the documented names, e.g.
- * {@code ingestion.requests} becomes {@code ingestion_requests_total}. Labels are low cardinality only
- * (outcome, reason, result): never tenant or device ids.
- */
+/** Custom metrics. Labels are low cardinality only (outcome, reason, result): never tenant or device ids. */
 @Component
 public class PlatformMetrics {
 
@@ -109,7 +105,6 @@ public class PlatformMetrics {
         publishFailure.increment();
     }
 
-    /** @param table one of outbox_events, idempotency_records, ingestion_records. */
     public void retentionDeleted(String table, int count) {
         retentionDeleted.get(table).increment(count);
     }

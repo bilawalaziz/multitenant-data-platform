@@ -25,22 +25,14 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
- * Publishes due outbox rows with at-least-once delivery. Rows are claimed with FOR UPDATE SKIP LOCKED in a short
- * transaction that also pushes next_attempt_at forward by {@code platform.outbox.lease}, so other instances skip
- * them. Kafka is called outside any transaction.
+ * At-least-once outbox publisher. Rows are claimed with FOR UPDATE SKIP LOCKED in a short transaction that also
+ * pushes next_attempt_at forward by the lease, so other instances skip them; Kafka is called outside any transaction.
  *
- * <p>A cycle issues the sends for the whole claimed batch in claim order without waiting for each acknowledgement,
- * then awaits all of them (together at most the send timeout) and records the outcomes in one transaction. A topic
- * whose send fails immediately is skipped for the rest of the cycle, so one tenant's broken topic does not hold up
- * the others; its remaining rows get the same backoff without counting an attempt. Issuing also stops at
- * {@code platform.outbox.issue-deadline}; rows not issued are released for the next cycle. Outcome updates only
- * apply while a row is still PENDING, so a concurrent requeue is not overwritten.
- *
- * <p>Delivery is still at-least-once: if the process dies after Kafka accepted a message but before the row is
- * marked, the lease expires and the row is published again. Consumers deduplicate on event_id. Ordering per device
- * is preserved for rows sent in one batch (idempotent producer, same key), but a row that failed can be overtaken
- * by a later row of the same device once it is retried. The lease must exceed the issue deadline plus the send
- * timeout; this is checked at startup.
+ * <p>A cycle issues all sends, then awaits them and records outcomes in one transaction. A topic whose send
+ * fails immediately is skipped for the rest of the cycle so one tenant cannot hold up the others. Issuing stops at
+ * the issue deadline and unsent rows are released. Outcome updates only apply to PENDING rows, so a concurrent
+ * requeue is not overwritten. The lease must exceed issue deadline plus send timeout (checked at startup).
+ * Consumers deduplicate on event_id.
  */
 @Component
 public class OutboxPublisher {

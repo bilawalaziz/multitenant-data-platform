@@ -15,7 +15,6 @@ import java.util.Map;
 import java.util.TreeMap;
 import org.springframework.stereotype.Component;
 
-/** Applies a validated {@link MappingDocument} to a (schema-valid) tenant payload. */
 @Component
 public class MappingEngine {
 

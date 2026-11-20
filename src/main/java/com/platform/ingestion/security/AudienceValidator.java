@@ -5,7 +5,6 @@ import org.springframework.security.oauth2.core.OAuth2TokenValidator;
 import org.springframework.security.oauth2.core.OAuth2TokenValidatorResult;
 import org.springframework.security.oauth2.jwt.Jwt;
 
-/** Requires the token's audience to contain the API's audience. */
 public class AudienceValidator implements OAuth2TokenValidator<Jwt> {
 
     private final String audience;

@@ -8,7 +8,6 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.HandlerInterceptor;
 import org.springframework.web.servlet.HandlerMapping;
 
-/** Applies {@link TenantAccessPolicy} to every request under /api/v1/tenants/{tenantId}. */
 @Component
 public class TenantPathInterceptor implements HandlerInterceptor {
 

@@ -9,10 +9,7 @@ import org.springframework.data.repository.query.Param;
 
 public interface IdempotencyRepository extends JpaRepository<IdempotencyRecord, IdempotencyRecord.Key> {
 
-    /**
-     * Atomically claims (tenant, key). Returns 1 when claimed, 0 when it already existed. A concurrent
-     * transaction inserting the same key blocks here until the first one commits or rolls back.
-     */
+    /** Returns 1 when claimed, 0 when it existed; a concurrent insert of the same key blocks until the first commits. */
     @Modifying
     @Query(
             value = "INSERT INTO platform.idempotency_records "

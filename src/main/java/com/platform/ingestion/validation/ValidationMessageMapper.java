@@ -9,7 +9,6 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-/** Translates library validation messages into client-friendly {field, message} pairs. */
 final class ValidationMessageMapper {
 
     private ValidationMessageMapper() {}

@@ -6,7 +6,6 @@ import java.util.concurrent.CompletionException;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.springframework.kafka.core.KafkaTemplate;
 
-/** Kafka implementation: key = device id, headers event_id / tenant_id / schema_version, completes on the broker ack. */
 public class KafkaEventPublisher implements EventPublisher {
 
     private final KafkaTemplate<String, String> template;

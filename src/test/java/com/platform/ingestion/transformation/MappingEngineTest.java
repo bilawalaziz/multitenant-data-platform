@@ -13,7 +13,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 class MappingEngineTest {
 
@@ -82,61 +86,26 @@ class MappingEngineTest {
     }
 
     @Test
-    void offsetTimestampIsNormalisedToUtcZ() {
-        MappedFields f = map(
+    void metadataIsOmittedWhenAbsentAndDefaultsApply() {
+        String payload = "{\"d\":\"M1\",\"s\":\"S\",\"v\":1,\"u\":\"C\",\"t\":\"2026-11-17T14:30:00Z\"}";
+        assertThat(map(BASE_MAPPING.formatted(",\"metadata.battery\":\"$.diag.battery\""), payload)
+                        .metadata())
+                .isEmpty();
+        assertThat(map(
+                                BASE_MAPPING.formatted(
+                                        ",\"metadata.site\":{\"path\":\"$.site\",\"default\":\"unknown\"}"),
+                                payload)
+                        .metadata())
+                .containsEntry("site", "unknown");
+    }
+
+    @Test
+    void timestampTransformsArrayPathsAndOffsetNormalisation() {
+        MappedFields offset = map(
                 BASE_MAPPING.formatted("").replace("\"$.t\"", "{\"path\":\"$.t\",\"transforms\":[\"isoTimestamp\"]}"),
                 "{\"d\":\"M1\",\"s\":\"S\",\"v\":1,\"u\":\"C\",\"t\":\"2026-11-17T16:30:00+02:00\"}");
-        assertThat(f.eventTimestamp().toString()).isEqualTo("2026-11-17T14:30:00Z");
-    }
+        assertThat(offset.eventTimestamp()).isEqualTo(Instant.parse("2026-11-17T14:30:00Z"));
 
-    @Test
-    void optionalMetadataWithoutDefaultIsOmittedWhenAbsent() {
-        MappedFields f = map(
-                BASE_MAPPING.formatted(",\"metadata.battery\":\"$.diag.battery\""),
-                "{\"d\":\"M1\",\"s\":\"S\",\"v\":1,\"u\":\"C\",\"t\":\"2026-11-17T14:30:00Z\"}");
-        assertThat(f.metadata()).isEmpty();
-    }
-
-    @Test
-    void metadataDefaultIsUsedWhenAbsent() {
-        MappedFields f = map(
-                BASE_MAPPING.formatted(",\"metadata.site\":{\"path\":\"$.site\",\"default\":\"unknown\"}"),
-                "{\"d\":\"M1\",\"s\":\"S\",\"v\":1,\"u\":\"C\",\"t\":\"2026-11-17T14:30:00Z\"}");
-        assertThat(f.metadata()).containsEntry("site", "unknown");
-    }
-
-    @Test
-    void missingRequiredValueFailsTransformation() {
-        assertThatThrownBy(() -> map(
-                        BASE_MAPPING.formatted(""),
-                        "{\"d\":\"M1\",\"v\":1,\"u\":\"C\",\"t\":\"2026-11-17T14:30:00Z\"}"))
-                .isInstanceOfSatisfying(ApiException.class, e -> {
-                    assertThat(e.errorCode()).isEqualTo(ErrorCode.TRANSFORMATION_FAILED);
-                    assertThat(e.errors()).anyMatch(f -> f.field().equals("sensor_id"));
-                });
-    }
-
-    @Test
-    void unmappedValueFailsTransformation() {
-        String mapping =
-                BASE_MAPPING.formatted("").replace("\"$.u\"", "{\"path\":\"$.u\",\"map\":{\"c\":\"CELSIUS\"}}");
-        assertThatThrownBy(() ->
-                        map(mapping, "{\"d\":\"M1\",\"s\":\"S\",\"v\":1,\"u\":\"k\",\"t\":\"2026-11-17T14:30:00Z\"}"))
-                .isInstanceOfSatisfying(
-                        ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.TRANSFORMATION_FAILED));
-    }
-
-    @Test
-    void nonNumericValueWithoutToNumberFails() {
-        assertThatThrownBy(() -> map(
-                        BASE_MAPPING.formatted(""),
-                        "{\"d\":\"M1\",\"s\":\"S\",\"v\":\"12\",\"u\":\"C\",\"t\":\"2026-11-17T14:30:00Z\"}"))
-                .isInstanceOfSatisfying(ApiException.class, e -> assertThat(e.errors())
-                        .anyMatch(f -> f.field().equals("value")));
-    }
-
-    @Test
-    void epochTransformsAndArrayPathsWork() {
         String mapping =
                 """
                 {"device_id":"$.d","sensor_id":"$.s[1]","value":{"path":"$.v","transforms":["toNumber"]},
@@ -152,5 +121,35 @@ class MappingEngineTest {
                 mapping.replace("epochSeconds", "epochMillis"),
                 "{\"d\":\"M1\",\"s\":[\"a\",\"b\"],\"v\":3,\"u\":\"c\",\"t\":1794061800000}");
         assertThat(g.eventTimestamp()).isEqualTo(Instant.ofEpochMilli(1794061800000L));
+    }
+
+    static Stream<Arguments> dataProblems() {
+        String unmapped =
+                BASE_MAPPING.formatted("").replace("\"$.u\"", "{\"path\":\"$.u\",\"map\":{\"c\":\"CELSIUS\"}}");
+        return Stream.of(
+                Arguments.of(
+                        "missing required value",
+                        BASE_MAPPING.formatted(""),
+                        "{\"d\":\"M1\",\"v\":1,\"u\":\"C\",\"t\":\"2026-11-17T14:30:00Z\"}",
+                        "sensor_id"),
+                Arguments.of(
+                        "value without a map entry",
+                        unmapped,
+                        "{\"d\":\"M1\",\"s\":\"S\",\"v\":1,\"u\":\"k\",\"t\":\"2026-11-17T14:30:00Z\"}",
+                        "unit"),
+                Arguments.of(
+                        "non-numeric value without toNumber",
+                        BASE_MAPPING.formatted(""),
+                        "{\"d\":\"M1\",\"s\":\"S\",\"v\":\"12\",\"u\":\"C\",\"t\":\"2026-11-17T14:30:00Z\"}",
+                        "value"));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("dataProblems")
+    void dataProblemsFailTransformation(String name, String mapping, String payload, String field) {
+        assertThatThrownBy(() -> map(mapping, payload)).isInstanceOfSatisfying(ApiException.class, e -> {
+            assertThat(e.errorCode()).isEqualTo(ErrorCode.TRANSFORMATION_FAILED);
+            assertThat(e.errors()).anyMatch(f -> f.field().equals(field));
+        });
     }
 }

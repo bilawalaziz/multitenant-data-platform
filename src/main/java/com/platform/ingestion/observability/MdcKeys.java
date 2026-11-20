@@ -1,6 +1,5 @@
 package com.platform.ingestion.observability;
 
-/** MDC keys attached to log lines (rendered as fields by the logstash format). */
 public final class MdcKeys {
 
     public static final String TENANT_ID = "tenantId";

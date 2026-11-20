@@ -15,7 +15,10 @@ import com.platform.ingestion.tenant.TenantStatus;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
-import org.junit.jupiter.api.Test;
+import java.util.stream.Stream;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 class TenantResolverTest {
 
@@ -33,58 +36,36 @@ class TenantResolverTest {
                 Instant.now());
     }
 
-    @Test
-    void resolvesTenantFromClaimUsingTrustedRecord() {
-        Tenant alpha = tenant("tenant-alpha", TenantStatus.ACTIVE);
-        when(tenants.findByTenantCode("tenant-alpha")).thenReturn(Optional.of(alpha));
-
-        TenantContext ctx = resolver.resolve(TestJwts.auth("tenant-alpha", Roles.TENANT_INGEST), null);
-
-        assertThat(ctx.code()).isEqualTo("tenant-alpha");
-        assertThat(ctx.id()).isEqualTo(alpha.getId());
-        assertThat(ctx.kafkaTopic()).isEqualTo("tenant-alpha.readings");
+    static Stream<Arguments> cases() {
+        return Stream.of(
+                Arguments.of("active tenant", "tenant-alpha", null, TenantStatus.ACTIVE, null),
+                Arguments.of("matching header", "tenant-alpha", "tenant-alpha", TenantStatus.ACTIVE, null),
+                Arguments.of(
+                        "header differs from claim", "tenant-alpha", "tenant-beta", null, ErrorCode.TENANT_MISMATCH),
+                Arguments.of("missing claim", null, null, null, ErrorCode.ACCESS_DENIED),
+                Arguments.of("unknown tenant", "tenant-ghost", null, null, ErrorCode.TENANT_NOT_REGISTERED),
+                Arguments.of("inactive tenant", "tenant-old", null, TenantStatus.INACTIVE, ErrorCode.TENANT_INACTIVE));
     }
 
-    @Test
-    void matchingHeaderIsAccepted() {
-        when(tenants.findByTenantCode("tenant-alpha"))
-                .thenReturn(Optional.of(tenant("tenant-alpha", TenantStatus.ACTIVE)));
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("cases")
+    void resolvesFromTrustedRecordOrRejects(
+            String name, String claim, String header, TenantStatus status, ErrorCode rejected) {
+        Tenant record = status == null ? null : tenant(claim, status);
+        if (claim != null) {
+            when(tenants.findByTenantCode(claim)).thenReturn(Optional.ofNullable(record));
+        }
+        var auth = TestJwts.auth(claim, Roles.TENANT_INGEST);
 
-        assertThat(resolver.resolve(TestJwts.auth("tenant-alpha", Roles.TENANT_INGEST), "tenant-alpha")
-                        .code())
-                .isEqualTo("tenant-alpha");
-    }
-
-    @Test
-    void headerDifferingFromClaimIsTenantMismatch() {
-        assertThatThrownBy(() -> resolver.resolve(TestJwts.auth("tenant-alpha", Roles.TENANT_INGEST), "tenant-beta"))
-                .isInstanceOfSatisfying(
-                        ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.TENANT_MISMATCH));
-    }
-
-    @Test
-    void missingClaimIsAccessDenied() {
-        assertThatThrownBy(() -> resolver.resolve(TestJwts.auth(null, Roles.TENANT_INGEST), null))
-                .isInstanceOfSatisfying(
-                        ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.ACCESS_DENIED));
-    }
-
-    @Test
-    void unknownTenantIsNotRegistered() {
-        when(tenants.findByTenantCode("tenant-ghost")).thenReturn(Optional.empty());
-
-        assertThatThrownBy(() -> resolver.resolve(TestJwts.auth("tenant-ghost", Roles.TENANT_INGEST), null))
-                .isInstanceOfSatisfying(
-                        ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.TENANT_NOT_REGISTERED));
-    }
-
-    @Test
-    void inactiveTenantIsRejected() {
-        when(tenants.findByTenantCode("tenant-old"))
-                .thenReturn(Optional.of(tenant("tenant-old", TenantStatus.INACTIVE)));
-
-        assertThatThrownBy(() -> resolver.resolve(TestJwts.auth("tenant-old", Roles.TENANT_INGEST), null))
-                .isInstanceOfSatisfying(
-                        ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.TENANT_INACTIVE));
+        if (rejected == null) {
+            TenantContext ctx = resolver.resolve(auth, header);
+            assertThat(ctx.code()).isEqualTo(claim);
+            assertThat(ctx.id()).isEqualTo(record.getId());
+            assertThat(ctx.kafkaTopic()).isEqualTo(claim + ".readings");
+        } else {
+            assertThatThrownBy(() -> resolver.resolve(auth, header))
+                    .isInstanceOfSatisfying(
+                            ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(rejected));
+        }
     }
 }

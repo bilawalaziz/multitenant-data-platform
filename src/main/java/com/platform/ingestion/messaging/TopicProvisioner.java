@@ -35,10 +35,6 @@ public class TopicProvisioner {
         this.timeout = timeout;
     }
 
-    /**
-     * @return true when the topic exists (created now, already existed or cached), false when it could not be
-     * ensured.
-     */
     public boolean tryEnsureTopic(String topic) {
         if (ensured.contains(topic)) {
             return true;
