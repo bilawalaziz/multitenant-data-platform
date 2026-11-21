@@ -3,7 +3,7 @@
 # Only Docker is required on the host.
 #
 #   scripts/ci-local.sh            # all jobs
-#   scripts/ci-local.sh build      # one job: lint | build | consumer | docker | workflows
+#   scripts/ci-local.sh build      # one job: lint | build | consumer | docker | workflows | infra
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -22,6 +22,11 @@ PYTHON_SLIM_IMAGE=python:3.12.8-slim
 TRIVY_IMAGE=aquasec/trivy:0.70.0
 ACTIONLINT_IMAGE=rhysd/actionlint:1.7.4
 PROMETHEUS_IMAGE=prom/prometheus:v3.5.0
+TERRAFORM_IMAGE=hashicorp/terraform:1.17.2
+TFLINT_IMAGE=ghcr.io/terraform-linters/tflint:v0.66.0
+HELM_IMAGE=alpine/helm:3.19.0
+KUBECONFORM_IMAGE=ghcr.io/yannh/kubeconform:v0.7.0-alpine
+SHELLCHECK_IMAGE=koalaman/shellcheck:v0.10.0
 
 # On Docker Desktop, containers started by Testcontainers are reached through host.docker.internal.
 TC_ENV=()
@@ -73,6 +78,68 @@ workflows() {
     .github/workflows/ci.yml .github/workflows/codeql.yml
 }
 
+# Terraform (both envs), Helm charts and the local runner script: format, validate, lint, schema and misconfiguration
+# checks. Nothing here talks to AWS or to a cluster; the aws env is initialised without a backend.
+infra() {
+  local tf=(docker run --rm -v "$REPO":/repo -v ci-local-tf-plugins:/tfcache -e TF_PLUGIN_CACHE_DIR=/tfcache
+    -e TF_IN_AUTOMATION=1)
+  echo "terraform fmt:"
+  "${tf[@]}" -w /repo/deploy/terraform "$TERRAFORM_IMAGE" fmt -check -recursive
+  local env
+  for env in aws local; do
+    echo "terraform validate envs/$env:"
+    "${tf[@]}" -w "/repo/deploy/terraform/envs/$env" -e TF_DATA_DIR="/repo/target/infra-ci/tf-$env" \
+      "$TERRAFORM_IMAGE" init -backend=false -input=false >/dev/null
+    "${tf[@]}" -w "/repo/deploy/terraform/envs/$env" -e TF_DATA_DIR="/repo/target/infra-ci/tf-$env" \
+      "$TERRAFORM_IMAGE" validate
+  done
+
+  echo "tflint:"
+  local tflint=(docker run --rm -v "$REPO":/repo -w /repo/deploy/terraform -v ci-local-tflint:/tflint
+    -e TFLINT_PLUGIN_DIR=/tflint "$TFLINT_IMAGE")
+  "${tflint[@]}" --init >/dev/null
+  "${tflint[@]}" --recursive --config=/repo/deploy/terraform/.tflint.hcl
+
+  echo "helm lint and render (our charts, both envs):"
+  docker run --rm -v "$REPO":/repo -w /repo/deploy/helm --entrypoint sh "$HELM_IMAGE" -c '
+    set -e
+    out=/repo/target/infra-ci/rendered
+    rm -rf "$out" && mkdir -p "$out"
+    realm=/repo/infra/keycloak/sensor-platform-realm.json
+    for e in local aws; do
+      helm lint --quiet sensor-platform -f sensor-platform/values-$e.yaml
+      helm template sensor-platform sensor-platform -n sensor-platform -f sensor-platform/values-$e.yaml \
+        > $out/sensor-platform-$e.yaml
+      helm lint --quiet keycloak -f keycloak/values-$e.yaml --set-file realm.json=$realm
+      helm template keycloak keycloak -n sensor-platform -f keycloak/values-$e.yaml --set-file realm.json=$realm \
+        > $out/keycloak-$e.yaml
+    done
+    helm lint --quiet local-data
+    helm template local-data local-data -n sensor-platform > $out/local-data-local.yaml
+    # The emulator CA only exists while the local stack runs; a placeholder is enough to render.
+    eso_local="--set store.enabled=true --set store.staticCredentials.enabled=true --set caConfigMap.enabled=true"
+    helm lint --quiet eso-config $eso_local --set caConfigMap.caPem=placeholder
+    helm template eso-config eso-config $eso_local --set caConfigMap.caPem=placeholder > $out/eso-config-local.yaml
+    helm template eso-config eso-config --set store.enabled=true > $out/eso-config-aws.yaml'
+
+  echo "kubeconform (CRDs from the datreeio catalog):"
+  docker run --rm -v "$REPO":/repo "$KUBECONFORM_IMAGE" -strict -summary -kubernetes-version 1.33.0 \
+    -schema-location default \
+    -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+    /repo/target/infra-ci/rendered
+
+  echo "trivy config (HIGH/CRITICAL fail the job):"
+  local trivy=(docker run --rm -v "$REPO":/repo -v ci-local-trivy:/root/.cache "$TRIVY_IMAGE" config --quiet
+    --severity "HIGH,CRITICAL" --exit-code 1)
+  "${trivy[@]}" --tf-exclude-downloaded-modules /repo/deploy/terraform
+  # Without --helm-kube-version trivy renders for Kubernetes 1.20, which the charts refuse, and scans nothing.
+  "${trivy[@]}" --helm-kube-version 1.33.0 --ignorefile /repo/deploy/helm/.trivyignore.yaml /repo/deploy/helm
+  "${trivy[@]}" --ignorefile /repo/deploy/helm/.trivyignore.yaml /repo/target/infra-ci/rendered
+
+  echo "shellcheck:"
+  docker run --rm -v "$REPO":/repo -w /repo "$SHELLCHECK_IMAGE" scripts/aws-local.sh scripts/ci-local.sh
+}
+
 run() {
   echo "==> $1"
   "$2"
@@ -85,15 +152,17 @@ case "${1:-all}" in
   consumer) run consumer consumer ;;
   docker) run docker docker_job ;;
   workflows) run workflows workflows ;;
+  infra) run infra infra ;;
   all)
     run workflows workflows
     run lint lint
     run consumer consumer
     run build build
     run docker docker_job
+    run infra infra
     ;;
   *)
-    echo "usage: $0 [all|lint|build|consumer|docker|workflows]" >&2
+    echo "usage: $0 [all|lint|build|consumer|docker|workflows|infra]" >&2
     exit 2
     ;;
 esac

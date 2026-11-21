@@ -172,7 +172,7 @@ With `prod`, these settings have no defaults and startup fails naming any that i
 |----------------------------------|-------------------------------------------------------------|----------------|
 | `./mvnw verify`                  | Unit tests and `*IT` integration tests                      | JDK 17, Docker |
 | `bash scripts/mvn.sh verify`     | Same build inside a JDK 17 container                        | Docker         |
-| `bash scripts/ci-local.sh [job]` | `workflows`, `lint`, `consumer`, `build` or `docker` (all if omitted) | Docker |
+| `bash scripts/ci-local.sh [job]` | `workflows`, `lint`, `consumer`, `build`, `docker` or `infra` (Terraform, Helm, kubeconform, trivy config, shellcheck; all if omitted) | Docker |
 
 Consumer tests run in the `consumer` job, which installs `consumer/requirements.txt`; to run them locally use
 `pip install -r consumer/requirements.txt`. Integration tests use Testcontainers for PostgreSQL and Kafka. The `docker` job builds both images, scans the app
