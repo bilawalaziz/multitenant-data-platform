@@ -1,0 +1,92 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  labels:
+    {{- include "ld.labels" . | nindent 4 }}
+    app.kubernetes.io/name: kafka
+spec:
+  selector:
+    {{- include "ld.selector" (dict "root" . "name" "kafka") | nindent 4 }}
+  ports:
+    - {name: client, port: 9092, targetPort: client}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  labels:
+    {{- include "ld.labels" . | nindent 4 }}
+    app.kubernetes.io/name: kafka
+spec:
+  serviceName: kafka
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "ld.selector" (dict "root" . "name" "kafka") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/kafka-config.yaml") . | sha256sum }}
+      labels:
+        {{- include "ld.labels" . | nindent 8 }}
+        app.kubernetes.io/name: kafka
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # appuser of the apache/kafka image
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: kafka
+          image: {{ .Values.kafka.image.repository }}:{{ .Values.kafka.image.tag }}
+          securityContext:
+            {{- include "ld.containerSecurity" . | nindent 12 }}
+          command: ["bash", "/config/start.sh"]
+          env:
+            - {name: CLUSTER_ID, value: {{ .Values.kafka.clusterId | quote }}}
+            - {name: KAFKA_HEAP_OPTS, value: {{ .Values.kafka.heapOpts | quote }}}
+            # kafka-run-class.sh writes its logs under LOG_DIR; the image directory is read only here.
+            - {name: LOG_DIR, value: /tmp/kafka-logs}
+            - name: KAFKA_SCRAM_USER
+              valueFrom: {secretKeyRef: {name: kafka-scram, key: username}}
+            - name: KAFKA_SCRAM_PASSWORD
+              valueFrom: {secretKeyRef: {name: kafka-scram, key: password}}
+          ports:
+            - {name: client, containerPort: 9092}
+          startupProbe:
+            tcpSocket: {port: client}
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            tcpSocket: {port: client}
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            tcpSocket: {port: client}
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.kafka.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /config, readOnly: true}
+            - {name: data, mountPath: /var/lib/kafka/data}
+            - {name: tmp, mountPath: /tmp}
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - name: config
+          configMap: {name: kafka-config}
+        - name: tmp
+          emptyDir: {sizeLimit: 128Mi}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: {{ .Values.kafka.storage }}

@@ -1,0 +1,122 @@
+# EKS: ECR images, RDS / ElastiCache / MSK in the data subnets, secrets from AWS Secrets Manager through External
+# Secrets (Pod Identity on the controller), ALB ingress. Replace the REPLACE_* values with the Terraform outputs of
+# deploy/terraform/envs/aws; the CIDRs below are the Terraform defaults for the VPC 10.20.0.0/16.
+
+image:
+  # Output ecr_repository_urls without the repository path: <account>.dkr.ecr.<region>.amazonaws.com
+  registry: REPLACE_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com
+  app: {repository: sensor-platform/app, tag: ""}
+  consumer: {repository: sensor-platform/consumer, tag: ""}
+
+config:
+  springProfiles: prod
+  db:
+    host: REPLACE_RDS_ADDRESS # output rds_address
+    port: 5432
+    name: sensor_platform
+    sslmode: require # rds.force_ssl=1 in the parameter group
+  redis:
+    host: REPLACE_REDIS_ENDPOINT # output redis_primary_endpoint
+    port: 6379
+    ssl: true
+  kafka:
+    bootstrapServers: REPLACE_MSK_BROKERS # output msk_bootstrap_brokers_sasl_scram (port 9096)
+    securityProtocol: SASL_SSL
+    saslMechanism: SCRAM-SHA-512
+    topicReplicationFactor: 3
+  keycloak:
+    issuerUri: https://keycloak.REPLACE_DOMAIN/realms/sensor-platform
+    jwkSetUri: http://keycloak:8080/realms/sensor-platform/protocol/openid-connect/certs
+    adminUrl: http://keycloak:8080
+  tracing:
+    otlpEndpoint: http://otel-collector.observability:4318
+    exportEnabled: true
+    samplingProbability: "0.1"
+
+externalSecrets:
+  enabled: true
+  storeRef: {name: aws-secrets, kind: ClusterSecretStore}
+  refreshInterval: 1h
+  prefix: sensor-platform
+
+dbBootstrap:
+  # The RDS managed master secret (output rds_master_secret_arn); External Secrets may read exactly this ARN.
+  master: {existingSecret: "", secretId: REPLACE_RDS_MASTER_SECRET_ARN}
+  sslmode: require
+
+app:
+  replicas: 3
+  resources:
+    requests: {cpu: 500m, memory: 768Mi}
+    limits: {memory: 1Gi}
+  ingress:
+    enabled: true
+    className: alb
+    hosts: [sensor.REPLACE_DOMAIN]
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/certificate-arn: REPLACE_ACM_CERTIFICATE_ARN # output acm_certificate_arn
+      alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      # output security_group_ids.alb: the group the node security group already allows
+      alb.ingress.kubernetes.io/security-groups: REPLACE_ALB_SECURITY_GROUP_ID
+      alb.ingress.kubernetes.io/healthcheck-path: /actuator/health/readiness
+      alb.ingress.kubernetes.io/healthcheck-port: "8081"
+      alb.ingress.kubernetes.io/success-codes: "200"
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 9
+    targetCPUUtilizationPercentage: 70
+  pdb: {enabled: true, minAvailable: 2}
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: sensor-platform
+          app.kubernetes.io/component: app
+
+consumer:
+  replicas: 3
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 256Mi}
+
+networkPolicy:
+  enabled: true
+  app:
+    ingressFrom:
+      # ALB targets are pod IPs: the load balancer connects from the public subnets.
+      - ipBlock: {cidr: 10.20.0.0/24}
+      - ipBlock: {cidr: 10.20.1.0/24}
+      - ipBlock: {cidr: 10.20.2.0/24}
+    prometheusFrom:
+      - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: observability}}
+        podSelector: {matchLabels: {app.kubernetes.io/name: prometheus}}
+    egress:
+      # RDS, ElastiCache and MSK live in the data subnets (10.20.100.0/24 - 10.20.102.0/24).
+      postgres:
+        peers: &data
+          - ipBlock: {cidr: 10.20.100.0/24}
+          - ipBlock: {cidr: 10.20.101.0/24}
+          - ipBlock: {cidr: 10.20.102.0/24}
+        ports: [5432]
+      redis: {peers: *data, ports: [6379]}
+      kafka: {peers: *data, ports: [9096]}
+      keycloak: {peers: [{podSelector: {matchLabels: {app.kubernetes.io/name: keycloak}}}], ports: [8080]}
+      otel: &otel
+        peers:
+          - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: observability}}
+            podSelector: {matchLabels: {app.kubernetes.io/name: opentelemetry-collector}}
+        ports: [4318]
+  consumer:
+    egress:
+      kafka: {peers: *data, ports: [9096]}
+      redis: {peers: *data, ports: [6379]}
+      otel: *otel
+  dbBootstrap:
+    egress:
+      postgres: {peers: *data, ports: [5432]}

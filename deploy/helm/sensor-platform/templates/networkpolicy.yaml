@@ -1,0 +1,99 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy }}
+# Default deny for every pod of this chart that talks to the data tier. Targets are opened one by one below.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sp.fullname" . }}-default-deny
+  labels:
+    {{- include "sp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+    matchExpressions:
+      - {key: app.kubernetes.io/component, operator: In, values: [app, consumer, db-bootstrap]}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sp.fullname" . }}-app
+  labels:
+    {{- include "sp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "sp.selector" (dict "root" . "component" "app") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    {{- if $np.app.ingressFrom }}
+    # The ingress controller (Traefik pods, or the ALB addresses in the VPC) reaches the API port only.
+    - from:
+        {{- toYaml $np.app.ingressFrom | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: 8080}
+    {{- end }}
+    {{- if $np.app.prometheusFrom }}
+    # Prometheus scrapes and the kubelet probes use the management port.
+    - from:
+        {{- toYaml $np.app.prometheusFrom | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: 8081}
+    {{- end }}
+  egress:
+    - to:
+        {{- toYaml $np.dns.peers | nindent 8 }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    {{- range $target := list "postgres" "redis" "kafka" "keycloak" "otel" }}
+    {{- include "sp.egressRule" (index $np.app.egress $target) | nindent 4 }}
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sp.fullname" . }}-consumer
+  labels:
+    {{- include "sp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: consumer
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "sp.selector" (dict "root" . "component" "consumer") | nindent 6 }}
+  # No ingress rules: the consumer serves nothing.
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        {{- toYaml $np.dns.peers | nindent 8 }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    {{- range $target := list "kafka" "redis" "otel" }}
+    {{- include "sp.egressRule" (index $np.consumer.egress $target) | nindent 4 }}
+    {{- end }}
+{{- if .Values.dbBootstrap.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sp.fullname" . }}-db-bootstrap
+  labels:
+    {{- include "sp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-bootstrap
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "sp.selector" (dict "root" . "component" "db-bootstrap") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        {{- toYaml $np.dns.peers | nindent 8 }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    {{- include "sp.egressRule" $np.dbBootstrap.egress.postgres | nindent 4 }}
+{{- end }}
+{{- end }}

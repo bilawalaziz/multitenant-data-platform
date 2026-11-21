@@ -111,6 +111,43 @@ def store_on(fake, ttl=604800):
     return c.DedupStore(fake, ttl)
 
 
+class SecurityConfigTest(unittest.TestCase):
+    def test_plaintext_default_adds_nothing(self):
+        self.assertEqual(c.kafka_security_config({}), {})
+        self.assertEqual(c.kafka_security_config({"KAFKA_SECURITY_PROTOCOL": "PLAINTEXT"}), {})
+
+    def test_sasl_ssl_scram_maps_to_librdkafka_keys(self):
+        env = {
+            "KAFKA_SECURITY_PROTOCOL": "SASL_SSL",
+            "KAFKA_SASL_MECHANISM": "SCRAM-SHA-512",
+            "KAFKA_SASL_USERNAME": "app",
+            "KAFKA_SASL_PASSWORD": "pw",
+        }
+        self.assertEqual(
+            c.kafka_security_config(env),
+            {
+                "security.protocol": "sasl_ssl",
+                "sasl.mechanisms": "SCRAM-SHA-512",
+                "sasl.username": "app",
+                "sasl.password": "pw",
+            },
+        )
+
+    def test_ssl_only_ignores_sasl_variables(self):
+        env = {"KAFKA_SECURITY_PROTOCOL": "SSL", "KAFKA_SASL_USERNAME": "app"}
+        self.assertEqual(c.kafka_security_config(env), {"security.protocol": "ssl"})
+
+    def test_redis_ssl_flag(self):
+        self.assertFalse(c.redis_ssl_enabled({}))
+        self.assertFalse(c.redis_ssl_enabled({"REDIS_SSL": "false"}))
+        self.assertTrue(c.redis_ssl_enabled({"REDIS_SSL": "true"}))
+
+    def test_from_env_passes_redis_ssl_to_the_client(self):
+        with mock.patch.dict(os.environ, {"REDIS_SSL": "true"}):
+            store = c.DedupStore.from_env()
+        self.assertIs(store.client.connection_pool.connection_class, redis.SSLConnection)
+
+
 class DedupTest(unittest.TestCase):
     def setUp(self):
         self.fake = FakeRedis()

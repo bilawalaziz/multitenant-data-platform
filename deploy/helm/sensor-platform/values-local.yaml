@@ -1,0 +1,82 @@
+# k3d: images from the local registry, data tier from the local-data chart, secrets from the AWS emulator through
+# External Secrets, Traefik ingress on *.localtest.me. Kafka uses SASL_PLAINTEXT with SCRAM-SHA-512 and Redis AUTH
+# without TLS, so the client authentication paths run exactly as on AWS.
+
+image:
+  # The single registry value; D4 pushes sensor-platform/app and sensor-platform/consumer here.
+  registry: k3d-sensor-registry:5000
+  app: {repository: sensor-platform/app, tag: local}
+  consumer: {repository: sensor-platform/consumer, tag: local}
+
+config:
+  springProfiles: docker
+  db: {host: postgres, port: 5432, name: sensor_platform, sslmode: ""}
+  redis: {host: redis, port: 6379, ssl: false}
+  kafka:
+    bootstrapServers: kafka:9092
+    securityProtocol: SASL_PLAINTEXT
+    saslMechanism: SCRAM-SHA-512
+    topicReplicationFactor: 1
+  keycloak:
+    issuerUri: http://keycloak.localtest.me/realms/sensor-platform
+    jwkSetUri: http://keycloak:8080/realms/sensor-platform/protocol/openid-connect/certs
+    adminUrl: http://keycloak:8080
+  tracing:
+    otlpEndpoint: http://otel-collector.observability:4318
+    exportEnabled: true
+    samplingProbability: "1.0"
+
+externalSecrets:
+  enabled: true
+  storeRef: {name: aws-secrets, kind: ClusterSecretStore}
+  refreshInterval: 1m
+
+dbBootstrap:
+  # The superuser of local-data; the bootstrap job then creates the roles exactly as it does on RDS.
+  master: {existingSecret: postgres-superuser, usernameKey: username, passwordKey: password}
+  sslmode: ""
+
+app:
+  replicas: 1
+  resources:
+    requests: {cpu: 100m, memory: 384Mi}
+    limits: {memory: 640Mi}
+  ingress:
+    enabled: true
+    className: traefik
+    hosts: [sensor.localtest.me]
+  pdb: {enabled: false}
+
+consumer:
+  replicas: 2
+  resources:
+    requests: {cpu: 25m, memory: 64Mi}
+    limits: {memory: 160Mi}
+
+networkPolicy:
+  enabled: true
+  app:
+    ingressFrom:
+      - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+        podSelector: {matchLabels: {app.kubernetes.io/name: traefik}}
+    prometheusFrom:
+      - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: observability}}
+        podSelector: {matchLabels: {app.kubernetes.io/name: prometheus}}
+    egress:
+      postgres: {peers: &postgres [{podSelector: {matchLabels: {app.kubernetes.io/name: postgres}}}], ports: [5432]}
+      redis: {peers: &redis [{podSelector: {matchLabels: {app.kubernetes.io/name: redis}}}], ports: [6379]}
+      kafka: {peers: &kafka [{podSelector: {matchLabels: {app.kubernetes.io/name: kafka}}}], ports: [9092]}
+      keycloak: {peers: [{podSelector: {matchLabels: {app.kubernetes.io/name: keycloak}}}], ports: [8080]}
+      otel: &otel
+        peers:
+          - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: observability}}
+            podSelector: {matchLabels: {app.kubernetes.io/name: opentelemetry-collector}}
+        ports: [4318]
+  consumer:
+    egress:
+      kafka: {peers: *kafka, ports: [9092]}
+      redis: {peers: *redis, ports: [6379]}
+      otel: *otel
+  dbBootstrap:
+    egress:
+      postgres: {peers: *postgres, ports: [5432]}

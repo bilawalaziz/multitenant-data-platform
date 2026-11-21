@@ -57,6 +57,27 @@ REDIS_TIMEOUT_SECONDS = 2
 RETRY_PAUSE_SECONDS = 1
 
 
+def kafka_security_config(environ=os.environ):
+    """librdkafka security settings from KAFKA_SECURITY_PROTOCOL / KAFKA_SASL_*; empty for the plaintext default."""
+    protocol = environ.get("KAFKA_SECURITY_PROTOCOL", "").strip().upper()
+    if not protocol or protocol == "PLAINTEXT":
+        return {}
+    conf = {"security.protocol": protocol.lower()}
+    if "SASL" in protocol:
+        for var, key in (
+            ("KAFKA_SASL_MECHANISM", "sasl.mechanisms"),
+            ("KAFKA_SASL_USERNAME", "sasl.username"),
+            ("KAFKA_SASL_PASSWORD", "sasl.password"),
+        ):
+            if environ.get(var):
+                conf[key] = environ[var]
+    return conf
+
+
+def redis_ssl_enabled(environ=os.environ):
+    return environ.get("REDIS_SSL", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def log(level, msg, **fields):
     rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"), "level": level, "msg": msg}
     ctx = trace.get_current_span().get_span_context()
@@ -164,6 +185,7 @@ class DedupStore:
             host=os.environ.get("REDIS_HOST", "localhost"),
             port=int(os.environ.get("REDIS_PORT", "6379")),
             password=os.environ.get("REDIS_PASSWORD") or None,
+            ssl=redis_ssl_enabled(),
             socket_connect_timeout=REDIS_TIMEOUT_SECONDS,
             socket_timeout=REDIS_TIMEOUT_SECONDS,
             retry=Retry(NoBackoff(), 0),
@@ -304,6 +326,7 @@ def main():
             "auto.offset.reset": "earliest",
             "topic.metadata.refresh.interval.ms": 10000,  # pick up topics created later by tenant registration
             "allow.auto.create.topics": False,
+            **kafka_security_config(),
         }
     )
     consumer.subscribe(topics, on_assign=on_assign, on_revoke=on_revoke)

@@ -1,0 +1,7 @@
+apiVersion: v2
+name: sensor-platform
+description: Multi-tenant sensor ingestion platform - API, Kafka consumer and database bootstrap
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.29.0-0"

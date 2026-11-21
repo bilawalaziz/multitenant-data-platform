@@ -1,0 +1,30 @@
+# tempo chart (single binary, grafana-community: the grafana/tempo chart is deprecated). Same shape as
+# infra/tempo/tempo.yaml; the collector sends OTLP gRPC to tempo.observability:4317.
+fullnameOverride: tempo
+
+tempo:
+  repository: grafana/tempo
+  tag: 2.10.10
+  reportingEnabled: false
+  retention: 24h
+  ingester:
+    max_block_duration: 5m
+  resources:
+    requests: {cpu: 50m, memory: 192Mi}
+    limits: {memory: 384Mi}
+
+serviceAccount:
+  create: true
+  # Must match the Pod Identity association in deploy/terraform (namespace observability).
+  name: tempo
+
+# The write-ahead log and, locally, the blocks live here.
+persistence:
+  enabled: true
+  size: 2Gi
+
+securityContext:
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  runAsNonRoot: true

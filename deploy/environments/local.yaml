@@ -1,0 +1,9 @@
+# State values of the local (k3d) environment. See deploy/helm/README.md.
+region: us-east-1
+
+# Single registry value for the application images (D4 pushes them here). Also in
+# helm/sensor-platform/values-local.yaml; this one wins because helmfile sets it last.
+registry: k3d-sensor-registry:5000
+
+# Emulator CA written by the D1 spike (deploy/spike/README.md); External Secrets mounts it to verify the endpoint.
+emulatorCaFile: ../.scratch/spike/emu-home/9297/ca.pem
