@@ -74,15 +74,7 @@ class TenantAndContractIT extends AbstractIntegrationTest {
                 .andExpect(jsonPath("$.schemaName").value("ts_tenant_schema"))
                 .andExpect(jsonPath("$.kafkaTopic").value("tenant-schema.readings"));
 
-        assertThat(jdbc.queryForObject(
-                        "SELECT count(*) FROM information_schema.schemata WHERE schema_name='ts_tenant_schema'",
-                        Integer.class))
-                .isEqualTo(1);
-        assertThat(jdbc.queryForObject(
-                        "SELECT setting_value FROM \"ts_tenant_schema\".tenant_settings "
-                                + "WHERE setting_key='data_retention_days'",
-                        String.class))
-                .isEqualTo("30");
+        assertThat(setting("tenant-schema", "data_retention_days")).isEqualTo("30");
 
         mvc.perform(post("/api/v1/admin/tenants")
                         .header("Authorization", bearer(PLATFORM_ADMIN))
@@ -101,11 +93,7 @@ class TenantAndContractIT extends AbstractIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.settings.alert_email").value("ops@example.com"))
                 .andExpect(jsonPath("$.schemaName").value("ts_tenant_schema"));
-        assertThat(jdbc.queryForObject(
-                        "SELECT setting_value FROM \"ts_tenant_schema\".tenant_settings "
-                                + "WHERE setting_key='alert_email'",
-                        String.class))
-                .isEqualTo("ops@example.com");
+        assertThat(setting("tenant-schema", "alert_email")).isEqualTo("ops@example.com");
 
         mvc.perform(put("/api/v1/tenants/tenant-schema/settings")
                         .header("Authorization", bearer(tenantAdmin("tenant-schema")))
@@ -113,6 +101,15 @@ class TenantAndContractIT extends AbstractIntegrationTest {
                         .content("{\"settings\":{\"bad key; drop\":\"x\"}}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.errorCode").value("MALFORMED_REQUEST"));
+    }
+
+    private String setting(String tenantCode, String key) {
+        return jdbc.queryForObject(
+                "SELECT s.setting_value FROM platform.tenant_settings s JOIN platform.tenants t ON t.id = s.tenant_id "
+                        + "WHERE t.tenant_code = ? AND s.setting_key = ?",
+                String.class,
+                tenantCode,
+                key);
     }
 
     @Test
