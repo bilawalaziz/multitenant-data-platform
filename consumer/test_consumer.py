@@ -364,12 +364,13 @@ class SubscriptionTest(unittest.TestCase):
                 with redirect_stdout(io.StringIO()):
                     with self.assertRaises(KeyboardInterrupt):
                         c.main()
-        fake.subscribe.assert_called_once_with(
-            [c.DEFAULT_TOPIC_PATTERN], on_assign=c.on_assign, on_revoke=c.on_revoke
-        )
+        fake.subscribe.assert_called_once_with([c.DEFAULT_TOPIC_PATTERN], on_assign=c.on_assign, on_revoke=c.on_revoke)
 
     def test_assignment_callbacks_log_the_partitions(self):
-        parts = [mock.Mock(topic="tenant-alpha.readings", partition=0), mock.Mock(topic="tenant-beta.readings", partition=2)]
+        parts = [
+            mock.Mock(topic="tenant-alpha.readings", partition=0),
+            mock.Mock(topic="tenant-beta.readings", partition=2),
+        ]
         for callback, msg in ((c.on_assign, "partitions assigned"), (c.on_revoke, "partitions revoked")):
             buf = io.StringIO()
             with redirect_stdout(buf):
