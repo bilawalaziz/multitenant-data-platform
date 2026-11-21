@@ -234,7 +234,7 @@ Pre-commit hooks (`pip install pre-commit && pre-commit install`): whitespace, Y
   registration or credential request for that device replaces such a client.
 - RLS guards against a missing tenant filter or a wrong id, not against SQL run as `sensor_app`, which could set
   `app.rls_system`. The `ts_*` schemas are created at runtime by the app role (it has `CREATE` on the database) and
-  are isolated by schema, not RLS. The `OR` in the policy may prevent index use on large tables.
+  are isolated by schema, not RLS.
 - Device tokens stay valid until expiry after a rotate or disable; the device registry check makes deactivation
   immediate. A device token can list the whole tenant's ingestions. In a rare cross-instance race a caller can end up
   with an invalid secret; `POST .../credentials` fixes it.
