@@ -1,0 +1,11 @@
+# State values of the AWS (EKS) environment. Replace the REPLACE_* values from the Terraform outputs of
+# deploy/terraform/envs/aws; nothing here is a secret. See deploy/helm/README.md.
+region: us-east-1
+clusterName: sensor-platform
+vpcId: REPLACE_VPC_ID
+
+# Output ecr_repository_urls without the repository path.
+registry: REPLACE_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com
+
+# Output tempo_bucket_name.
+tempoBucket: REPLACE_TEMPO_BUCKET

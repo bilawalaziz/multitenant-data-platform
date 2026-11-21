@@ -1,0 +1,50 @@
+{{- $labels := dict "app.kubernetes.io/managed-by" .Release.Service "app.kubernetes.io/part-of" "sensor-platform" "helm.sh/chart" (printf "%s-%s" .Chart.Name .Chart.Version) }}
+{{- if .Values.caConfigMap.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.caConfigMap.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- toYaml $labels | nindent 4 }}
+data:
+  ca.pem: |
+    {{- required "caConfigMap.caPem is required (pass the emulator CA with --set-file)" .Values.caConfigMap.caPem | nindent 4 }}
+{{- end }}
+{{- if .Values.store.enabled }}
+{{- with .Values.store.staticCredentials }}
+{{- if .enabled }}
+---
+# Dummy credentials: the emulator runs with authentication off and ignores them.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .secretName }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- toYaml $labels | nindent 4 }}
+type: Opaque
+stringData:
+  access-key: {{ .accessKey | quote }}
+  secret-key: {{ .secretKey | quote }}
+{{- end }}
+{{- end }}
+---
+apiVersion: external-secrets.io/v1
+kind: ClusterSecretStore
+metadata:
+  name: {{ .Values.store.name }}
+  labels:
+    {{- toYaml $labels | nindent 4 }}
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: {{ .Values.store.region }}
+      {{- if .Values.store.staticCredentials.enabled }}
+      auth:
+        secretRef:
+          accessKeyIDSecretRef: {name: {{ .Values.store.staticCredentials.secretName }}, namespace: {{ .Values.namespace }}, key: access-key}
+          secretAccessKeySecretRef: {name: {{ .Values.store.staticCredentials.secretName }}, namespace: {{ .Values.namespace }}, key: secret-key}
+      {{- end }}
+{{- end }}

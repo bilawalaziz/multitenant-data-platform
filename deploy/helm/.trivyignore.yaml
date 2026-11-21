@@ -1,0 +1,21 @@
+# Scoped suppressions for `trivy config` on deploy/helm (see README.md, "Checks"). Each one names its reason.
+misconfigurations:
+  # Keycloak in production mode (`start`) builds its optimised server on first start, which writes below
+  # /opt/keycloak. Every other hardening setting is on (non-root, no privilege escalation, drop ALL, seccomp).
+  # A read-only root needs a pre-built `--optimized` image, which this deployment does not have.
+  - id: KSV-0014
+    paths: ["**/keycloak.yaml", "**/keycloak-*.yaml"]
+    statement: Keycloak start (not --optimized) writes its augmented build below /opt/keycloak
+  - id: AVD-KSV-0014
+    paths: ["**/keycloak.yaml", "**/keycloak-*.yaml"]
+    statement: Keycloak start (not --optimized) writes its augmented build below /opt/keycloak
+
+  # False positive: the scripts in these ConfigMaps read credentials from environment variables that come from
+  # Secrets (\getenv in psql, $KAFKA_SCRAM_PASSWORD in the broker start script). The words "ALTER ROLE ... PASSWORD"
+  # and "--add-scram" trip the heuristic; no credential value is in either file.
+  - id: KSV-0109
+    paths: ["**/db-bootstrap.yaml", "**/sensor-platform-*.yaml", "**/kafka-config.yaml", "**/local-data-*.yaml"]
+    statement: scripts reference Secret-backed environment variables only
+  - id: AVD-KSV-0109
+    paths: ["**/db-bootstrap.yaml", "**/sensor-platform-*.yaml", "**/kafka-config.yaml", "**/local-data-*.yaml"]
+    statement: scripts reference Secret-backed environment variables only

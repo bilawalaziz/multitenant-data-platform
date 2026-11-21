@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sp.fullname" . }}-consumer
+  labels:
+    {{- include "sp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: consumer
+spec:
+  replicas: {{ .Values.consumer.replicas }}
+  selector:
+    matchLabels:
+      {{- include "sp.selector" (dict "root" . "component" "consumer") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.consumer.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "sp.labels" . | nindent 8 }}
+        app.kubernetes.io/component: consumer
+    spec:
+      serviceAccountName: {{ default (printf "%s-consumer" (include "sp.fullname" .)) .Values.consumer.serviceAccount.name }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Longer than the consumer's own shutdown (finish the message, commit, leave the group).
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: consumer
+          image: {{ include "sp.image" (dict "root" . "image" .Values.image.consumer) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "sp.containerSecurity" . | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "sp.fullname" . }}-consumer
+            - secretRef:
+                name: {{ include "sp.secretName" (dict "root" . "component" "consumer") }}
+          resources:
+            {{- toYaml .Values.consumer.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 32Mi}
+      {{- with .Values.consumer.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.consumer.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.consumer.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.consumer.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

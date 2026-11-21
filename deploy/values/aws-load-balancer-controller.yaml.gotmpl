@@ -1,0 +1,15 @@
+# aws-load-balancer-controller chart 3.6.3 (the policy in the Terraform iam module is the official one of v3.6.3).
+clusterName: {{ .Values.clusterName }}
+region: {{ .Values.region }}
+vpcId: {{ .Values.vpcId }}
+
+serviceAccount:
+  create: true
+  # Must match the Pod Identity association in deploy/terraform (namespace kube-system). No IRSA annotation:
+  # Pod Identity associates by service account name.
+  name: aws-load-balancer-controller
+
+replicaCount: 2
+resources:
+  requests: {cpu: 50m, memory: 96Mi}
+  limits: {memory: 192Mi}

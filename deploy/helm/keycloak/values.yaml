@@ -1,0 +1,57 @@
+# Keycloak in production mode: `start` (not start-dev), PostgreSQL, hostname fixed, plain HTTP behind the ingress.
+
+image: {repository: quay.io/keycloak/keycloak, tag: 26.8.2, pullPolicy: IfNotPresent}
+replicas: 1
+
+# Public URL tokens are issued for (the "iss" claim); the application keeps a separate in-cluster JWK URI.
+hostname: http://keycloak.localtest.me
+
+db:
+  host: postgres
+  port: 5432
+  name: keycloak
+  sslmode: ""
+
+# Realm import. The JSON is not copied into the chart: helmfile passes infra/keycloak/sensor-platform-realm.json with
+# --set-file realm.json=... Without it no realm is imported. The ${...} placeholders in the file are resolved from the
+# environment: PROVISIONER_CLIENT_SECRET from Secrets Manager, the others from realmSecrets.
+realm:
+  json: ""
+
+externalSecrets:
+  enabled: true
+  storeRef: {name: aws-secrets, kind: ClusterSecretStore}
+  refreshInterval: 1h
+  prefix: sensor-platform
+
+# Used only when externalSecrets.enabled is false (tests): ADMIN_USER, ADMIN_PASSWORD, DB_USER, DB_PASSWORD,
+# PROVISIONER_CLIENT_SECRET.
+plainSecrets: {}
+
+# Demo users and tenant ingestion clients of the imported realm are not in Secrets Manager (the Terraform secrets
+# module only creates the provisioner secret). They are generated once in the cluster and kept across upgrades; read
+# them with: kubectl get secret keycloak-realm-secrets -o jsonpath='{.data.DEMO_USER_PASSWORD}' | base64 -d
+realmSecrets:
+  generate: true
+  keys: [DEMO_USER_PASSWORD, ALPHA_INGEST_CLIENT_SECRET, BETA_INGEST_CLIENT_SECRET]
+
+# Several replicas share their caches through JGroups with Kubernetes DNS discovery.
+clustering:
+  enabled: false
+
+resources:
+  requests: {cpu: 200m, memory: 768Mi}
+  limits: {memory: 1Gi}
+javaOptsKcHeap: "-Xms256m -Xmx512m"
+
+service: {port: 8080}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

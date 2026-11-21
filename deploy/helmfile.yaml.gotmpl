@@ -1,0 +1,157 @@
+# Releases of the platform. Run from the deploy directory:
+#   helmfile -e local template | apply      (k3d, see helm/README.md)
+#   helmfile -e aws template                (apply only with the Terraform outputs filled in)
+# The file ends in .gotmpl because Helmfile v1 renders Go templates only for that extension.
+# Every chart version is pinned; the local charts are versioned with the repository.
+environments:
+  local:
+    values:
+      - environments/local.yaml
+  aws:
+    values:
+      - environments/aws.yaml
+
+---
+{{- $local := eq .Environment.Name "local" }}
+{{- $env := .Environment.Name }}
+
+repositories:
+  - name: external-secrets
+    url: https://charts.external-secrets.io
+  - name: open-telemetry
+    url: https://open-telemetry.github.io/opentelemetry-helm-charts
+  - name: grafana-community
+    url: https://grafana-community.github.io/helm-charts
+  - name: prometheus-community
+    url: https://prometheus-community.github.io/helm-charts
+  - name: eks
+    url: https://aws.github.io/eks-charts
+
+helmDefaults:
+  wait: true
+  timeout: 600
+  atomic: false
+  createNamespace: true
+
+releases:
+  # ---- secrets plumbing -----------------------------------------------------------------------------------------
+{{- if $local }}
+  # Local only: the emulator CA must exist before the External Secrets pods start (they mount it).
+  - name: eso-prereq
+    namespace: external-secrets
+    chart: ./helm/eso-config
+    version: 0.1.0
+    wait: false
+    values:
+      - caConfigMap:
+          enabled: true
+    set:
+      - name: caConfigMap.caPem
+        file: {{ .Values.emulatorCaFile }}
+{{- end }}
+
+  - name: external-secrets
+    namespace: external-secrets
+    chart: external-secrets/external-secrets
+    version: 2.15.0
+{{- if $local }}
+    needs: [external-secrets/eso-prereq]
+{{- end }}
+    values:
+      - values/external-secrets.yaml
+      - values/external-secrets-{{ $env }}.yaml
+
+  # The ClusterSecretStore every application chart references (externalSecrets.storeRef).
+  - name: eso-config
+    namespace: external-secrets
+    chart: ./helm/eso-config
+    version: 0.1.0
+    needs: [external-secrets/external-secrets]
+    values:
+      - store:
+          enabled: true
+          region: {{ .Values.region }}
+          staticCredentials:
+            enabled: {{ $local }}
+
+{{- if not $local }}
+  # ---- ingress -----------------------------------------------------------------------------------------------
+  - name: aws-load-balancer-controller
+    namespace: kube-system
+    chart: eks/aws-load-balancer-controller
+    version: 3.6.3
+    values:
+      - values/aws-load-balancer-controller.yaml.gotmpl
+{{- end }}
+
+  # ---- data tier -------------------------------------------------------------------------------------------------
+{{- if $local }}
+  # Local only: stand-ins for RDS, ElastiCache and MSK.
+  - name: local-data
+    namespace: sensor-platform
+    chart: ./helm/local-data
+    version: 0.1.0
+    needs: [external-secrets/eso-config]
+{{- end }}
+
+  # ---- application -----------------------------------------------------------------------------------------------
+  # The db-bootstrap pre-install hook creates the database roles and the Keycloak database (helm/README.md).
+  - name: sensor-platform
+    namespace: sensor-platform
+    chart: ./helm/sensor-platform
+    version: 0.1.0
+    needs:
+      - external-secrets/eso-config
+{{- if $local }}
+      - sensor-platform/local-data
+{{- end }}
+    values:
+      - helm/sensor-platform/values-{{ $env }}.yaml
+    set:
+      - name: image.registry
+        value: {{ .Values.registry }}
+
+  # Keycloak waits for sensor-platform because the bootstrap hook creates its role and database.
+  - name: keycloak
+    namespace: sensor-platform
+    chart: ./helm/keycloak
+    version: 0.1.0
+    needs: [sensor-platform/sensor-platform]
+    values:
+      - helm/keycloak/values-{{ $env }}.yaml
+    set:
+      - name: realm.json
+        file: ../infra/keycloak/sensor-platform-realm.json
+
+  # ---- observability -------------------------------------------------------------------------------------------
+  - name: tempo
+    namespace: observability
+    chart: grafana-community/tempo
+    version: 2.4.0
+    values:
+      - values/tempo.yaml
+      - values/tempo-{{ $env }}.yaml{{ if not $local }}.gotmpl{{ end }}
+
+  - name: otel-collector
+    namespace: observability
+    chart: open-telemetry/opentelemetry-collector
+    version: 0.181.0
+    values:
+      - values/otel-collector.yaml
+
+  - name: prometheus
+    namespace: observability
+    chart: prometheus-community/prometheus
+    version: 29.48.0
+    values:
+      - values/prometheus.yaml.gotmpl
+
+  - name: grafana
+    namespace: observability
+    chart: grafana-community/grafana
+    version: 14.5.0
+    values:
+      - values/grafana.yaml.gotmpl
+{{- if $local }}
+      - values/grafana-local.yaml
+{{- end }}

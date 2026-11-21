@@ -1,0 +1,49 @@
+# LOCAL ONLY. These workloads replace RDS, ElastiCache and MSK in k3d. They have no backups, no HA and no TLS.
+# The images are the ones docker-compose.yml uses (Kafka and PostgreSQL) so behaviour matches the compose stack.
+
+# Credentials of the data services come from the same Secrets Manager entries the application reads
+# (sensor-platform/redis/auth, sensor-platform/kafka/app), so both sides always agree. The PostgreSQL superuser is
+# local to this chart: the db-bootstrap job of the sensor-platform chart logs in with it.
+externalSecrets:
+  enabled: true
+  storeRef: {name: aws-secrets, kind: ClusterSecretStore}
+  refreshInterval: 1m
+  prefix: sensor-platform
+
+# Used only when externalSecrets.enabled is false.
+plainSecrets:
+  redisPassword: ""
+  kafkaUsername: sensor_app
+  kafkaPassword: ""
+
+postgres:
+  image: {repository: postgres, tag: 17-alpine}
+  superuser:
+    name: postgres
+    # Empty: a random password generated once and kept on upgrades. Read by name from the postgres-superuser Secret.
+    password: ""
+  storage: 1Gi
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {memory: 384Mi}
+
+redis:
+  image: {repository: redis, tag: 7.4.12-alpine}
+  # Same sizing rule as compose: maxmemory about 25% below the container limit.
+  maxmemory: 96mb
+  storage: 256Mi
+  resources:
+    requests: {cpu: 20m, memory: 48Mi}
+    limits: {memory: 128Mi}
+
+kafka:
+  image: {repository: apache/kafka, tag: 3.9.0}
+  # 3 partitions is what the compose broker defaults to; replication factor is 1 (single broker).
+  numPartitions: 3
+  heapOpts: "-Xms128m -Xmx384m"
+  storage: 1Gi
+  # Fixed KRaft cluster id (any 22 character base64url string).
+  clusterId: MkU3OEVBNTcwNTJENDM2Qk
+  resources:
+    requests: {cpu: 100m, memory: 384Mi}
+    limits: {memory: 640Mi}

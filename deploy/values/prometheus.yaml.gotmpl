@@ -1,0 +1,32 @@
+# prometheus chart, server only. The scrape configuration of infra/prometheus/prometheus.yml; the alert rules are
+# read from infra/prometheus/alerts.yml itself (the file `promtool test` covers), so the two cannot drift.
+server:
+  fullnameOverride: prometheus-server
+  image:
+    tag: v3.5.0
+  retention: 7d
+  persistentVolume:
+    enabled: true
+    size: 4Gi
+  resources:
+    requests: {cpu: 50m, memory: 192Mi}
+    limits: {memory: 384Mi}
+  global:
+    scrape_interval: 15s
+    evaluation_interval: 15s
+
+alertmanager: {enabled: false}
+kube-state-metrics: {enabled: false}
+prometheus-node-exporter: {enabled: false}
+prometheus-pushgateway: {enabled: false}
+
+serverFiles:
+  alerting_rules.yml:
+{{ readFile "../../infra/prometheus/alerts.yml" | indent 4 }}
+  prometheus.yml:
+    scrape_configs:
+      # The service, not the pods: the scrape follows whichever replicas are ready.
+      - job_name: sensor-ingestion-platform
+        metrics_path: /actuator/prometheus
+        static_configs:
+          - targets: ["sensor-platform-app.sensor-platform:8081"]

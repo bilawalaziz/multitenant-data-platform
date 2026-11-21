@@ -1,0 +1,190 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: keycloak
+  labels:
+    {{- include "kc.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  labels:
+    {{- include "kc.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "kc.selector" . | nindent 4 }}
+  ports:
+    - {name: http, port: {{ .Values.service.port }}, targetPort: http}
+{{- if .Values.clustering.enabled }}
+---
+# JGroups discovery between replicas (DNS_PING resolves this name to every pod).
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-headless
+  labels:
+    {{- include "kc.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "kc.selector" . | nindent 4 }}
+  ports:
+    - {name: jgroups, port: 7800, targetPort: jgroups}
+{{- end }}
+{{- if .Values.realm.json }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm
+  labels:
+    {{- include "kc.labels" . | nindent 4 }}
+data:
+  sensor-platform-realm.json: |
+    {{- .Values.realm.json | nindent 4 }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  labels:
+    {{- include "kc.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "kc.selector" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- if .Values.realm.json }}
+        checksum/realm: {{ .Values.realm.json | sha256sum }}
+        {{- end }}
+      labels:
+        {{- include "kc.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: keycloak
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: keycloak
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Production mode. The first start builds the optimised server for the PostgreSQL vendor, which writes
+          # under /opt/keycloak, so the root filesystem stays writable (see README).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          args:
+            - start
+            {{- if .Values.realm.json }}
+            - --import-realm
+            {{- end }}
+          envFrom:
+            - secretRef: {name: keycloak-secrets}
+            {{- if .Values.realmSecrets.generate }}
+            - secretRef: {name: keycloak-realm-secrets}
+            {{- end }}
+          env:
+            - {name: KC_DB, value: postgres}
+            - {name: KC_DB_URL, value: {{ include "kc.jdbcUrl" . | quote }}}
+            - {name: KC_HOSTNAME, value: {{ .Values.hostname | quote }}}
+            # The application reaches Keycloak by its service name; the issuer stays the public hostname.
+            - {name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC, value: "true"}
+            # TLS ends at the ingress / ALB.
+            - {name: KC_HTTP_ENABLED, value: "true"}
+            - {name: KC_PROXY_HEADERS, value: xforwarded}
+            - {name: KC_HEALTH_ENABLED, value: "true"}
+            - {name: JAVA_OPTS_KC_HEAP, value: {{ .Values.javaOptsKcHeap | quote }}}
+            {{- if .Values.clustering.enabled }}
+            - {name: KC_CACHE, value: ispn}
+            - {name: KC_CACHE_STACK, value: kubernetes}
+            - {name: JAVA_OPTS_APPEND, value: "-Djgroups.dns.query=keycloak-headless.{{ .Release.Namespace }}.svc.cluster.local"}
+            {{- end }}
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: management, containerPort: 9000}
+            {{- if .Values.clustering.enabled }}
+            - {name: jgroups, containerPort: 7800}
+            {{- end }}
+          startupProbe:
+            httpGet: {path: /health/started, port: management}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /health/ready, port: management}
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: {path: /health/live, port: management}
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            {{- if .Values.realm.json }}
+            - {name: realm, mountPath: /opt/keycloak/data/import, readOnly: true}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 128Mi}
+        {{- if .Values.realm.json }}
+        - name: realm
+          configMap: {name: keycloak-realm}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak
+  labels:
+    {{- include "kc.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ . | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port: {name: http}
+    {{- end }}
+{{- end }}
