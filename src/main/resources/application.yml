@@ -14,8 +14,9 @@ spring:
       maximum-pool-size: 10
       connection-timeout: 5000
       data-source-properties:
-        # Server-side limits for every pooled connection, including Flyway. A migration that needs longer
-        # (for example an index build on a large table) raises its own limit with SET LOCAL statement_timeout.
+        # Server-side limits for every connection of the application pool. Flyway opens its own connection as the
+        # migration role and does not get these; a migration that sets its own limit (SET LOCAL statement_timeout)
+        # keeps working either way.
         options: "-c statement_timeout=${DB_STATEMENT_TIMEOUT_MS:15000} -c lock_timeout=${DB_LOCK_TIMEOUT_MS:5000}"
   task:
     scheduling:

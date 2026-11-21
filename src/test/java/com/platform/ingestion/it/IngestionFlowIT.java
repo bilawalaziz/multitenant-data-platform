@@ -648,6 +648,26 @@ class IngestionFlowIT extends AbstractIntegrationTest {
         assertThat(span.getSpanId()).isEqualTo(header.group(2));
     }
 
+    /** With prod sampling most requests arrive or start unsampled; the trace must still reach the consumer. */
+    @Test
+    void unsampledIncomingTraceIsStillPropagatedWithTheSampledFlagOff() throws Exception {
+        drainOutbox();
+        String traceId = "0af7651916cd43dd8448eb211c80319c";
+        JsonNode accepted = ingestWithTraceparent("00-" + traceId + "-b7ad6b7169203331-00");
+        String eventId = accepted.get("eventId").asText();
+
+        Matcher stored = TRACEPARENT.matcher(storedTraceParent(eventId));
+        assertThat(stored.matches()).isTrue();
+        assertThat(stored.group(1)).isEqualTo(traceId);
+        assertThat(stored.group(3)).isEqualTo("00");
+
+        assertThat(outboxPublisher.publishDue()).isGreaterThanOrEqualTo(1);
+
+        Matcher header = traceparentOf(recordFor("tenant-alpha.readings", eventId));
+        assertThat(header.group(1)).isEqualTo(traceId);
+        assertThat(header.group(3)).isEqualTo("00");
+    }
+
     @Test
     void withoutAnIncomingTraceparentANewTraceIsStartedAndPropagated() throws Exception {
         drainOutbox();
