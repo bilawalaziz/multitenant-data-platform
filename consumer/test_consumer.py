@@ -1,19 +1,25 @@
 import io
 import json
+import os
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
+import redis
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 import consumer as c
 
+EID = "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b"
+EID2 = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+
 
 def good(**over):
     ev = {
-        "event_id": "e1",
+        "event_id": EID,
         "schema_version": "1.0",
         "tenant_id": "tenant-alpha",
         "ingestion_id": "i1",
@@ -78,9 +84,37 @@ class DqTest(unittest.TestCase):
         self.assertEqual(len(c.dq_warnings(good(event_timestamp=far), self.NOW)), 1)
 
 
+class FakeRedis:
+    """The slice of redis-py that DedupStore uses, with a controllable clock and failure."""
+
+    def __init__(self):
+        self.data = {}  # key -> (value, expires_at)
+        self.ttls = {}
+        self.now = 0
+        self.down = False
+
+    def set(self, name, value, nx=False, ex=None):
+        if self.down:
+            raise redis.ConnectionError("connection refused")
+        entry = self.data.get(name)
+        if nx and entry is not None and entry[1] > self.now:
+            return None
+        self.data[name] = (value, self.now + ex)
+        self.ttls[name] = ex
+        return True
+
+    def close(self):
+        pass
+
+
+def store_on(fake, ttl=604800):
+    return c.DedupStore(fake, ttl)
+
+
 class DedupTest(unittest.TestCase):
     def setUp(self):
-        self.store = c.DedupStore(":memory:")
+        self.fake = FakeRedis()
+        self.store = store_on(self.fake)
 
     def run_quiet(self, raw):
         buf = io.StringIO()
@@ -93,12 +127,51 @@ class DedupTest(unittest.TestCase):
         r1, logs1 = self.run_quiet(raw)
         r2, logs2 = self.run_quiet(raw)
         self.assertEqual((r1, r2), ("processed", "duplicate"))
-        self.assertEqual(logs1[-1]["event_id"], "e1")
+        self.assertEqual(logs1[-1]["event_id"], EID)
         self.assertIn("skipped", logs2[-1]["msg"])
 
     def test_different_ids_both_processed(self):
-        self.assertEqual(self.run_quiet(json.dumps(good(event_id="a")))[0], "processed")
-        self.assertEqual(self.run_quiet(json.dumps(good(event_id="b")))[0], "processed")
+        self.assertEqual(self.run_quiet(json.dumps(good(event_id=EID)))[0], "processed")
+        self.assertEqual(self.run_quiet(json.dumps(good(event_id=EID2)))[0], "processed")
+
+    def test_two_instances_sharing_redis_process_an_event_once(self):
+        second = store_on(self.fake)
+        raw = json.dumps(good())
+        with redirect_stdout(io.StringIO()):
+            results = [c.process_payload(raw, self.store), c.process_payload(raw, second)]
+        self.assertEqual(results, ["processed", "duplicate"])
+        self.assertEqual(self.fake.data[f"dedup:{EID}"][0], "tenant-alpha")
+
+    def test_key_has_the_configured_ttl_and_expires_with_it(self):
+        short = store_on(self.fake, ttl=60)
+        self.assertTrue(short.first_seen(EID, "t"))
+        self.assertEqual(self.fake.ttls[f"dedup:{EID}"], 60)
+        self.fake.now = 59
+        self.assertFalse(short.first_seen(EID, "t"))
+        self.fake.now = 61
+        self.assertTrue(short.first_seen(EID, "t"))
+
+    def test_default_ttl_is_the_seven_day_idempotency_window(self):
+        self.store.first_seen(EID, "t")
+        self.assertEqual(self.fake.ttls[f"dedup:{EID}"], 7 * 24 * 3600)
+
+    def test_from_env_reads_settings_without_connecting(self):
+        env = {"REDIS_HOST": "r", "REDIS_PORT": "6380", "REDIS_PASSWORD": "pw", "DEDUP_TTL_SECONDS": "30"}
+        with mock.patch.dict(os.environ, env):
+            store = c.DedupStore.from_env()
+        kw = store.client.connection_pool.connection_kwargs
+        self.assertEqual((kw["host"], kw["port"], kw["password"]), ("r", 6380, "pw"))
+        self.assertEqual((kw["socket_timeout"], kw["socket_connect_timeout"]), (2, 2))
+        self.assertEqual(store.ttl_seconds, 30)
+
+    def test_event_id_that_is_not_a_uuid_is_invalid_and_never_reaches_redis(self):
+        for bad in ("e1", "x" * 5000, "dedup:../../x", EID + "-extra"):
+            self.assertEqual(self.run_quiet(json.dumps(good(event_id=bad)))[0], "invalid")
+        self.assertEqual(self.fake.data, {})
+
+    def test_uppercase_uuid_is_the_same_event(self):
+        self.assertEqual(self.run_quiet(json.dumps(good(event_id=EID)))[0], "processed")
+        self.assertEqual(self.run_quiet(json.dumps(good(event_id=EID.upper())))[0], "duplicate")
 
     def test_poison_not_json(self):
         r, logs = self.run_quiet(b"\xff{not json")
@@ -136,7 +209,7 @@ class TracingTest(unittest.TestCase):
     PARENT_SPAN_ID = "00f067aa0ba902b7"
 
     def setUp(self):
-        self.store = c.DedupStore(":memory:")
+        self.store = store_on(FakeRedis())
         self.exporter = InMemorySpanExporter()
         provider = TracerProvider()
         provider.add_span_processor(SimpleSpanProcessor(self.exporter))
@@ -153,7 +226,7 @@ class TracingTest(unittest.TestCase):
 
     def test_continues_the_trace_in_the_kafka_headers_and_logs_its_id(self):
         headers = [
-            ("event_id", b"e1"),
+            ("event_id", EID.encode()),
             ("traceparent", f"00-{self.TRACE_ID}-{self.PARENT_SPAN_ID}-01".encode()),
         ]
         result, logs, spans = self.handle(FakeMessage(json.dumps(good()), headers))
@@ -195,6 +268,75 @@ class TracingTest(unittest.TestCase):
             ["invalid", "processed", "duplicate"],
         )
         self.assertEqual(logs[-1]["trace_id"], self.TRACE_ID)
+
+
+class FakeKafkaConsumer:
+    def __init__(self):
+        self.commits, self.seeks = [], []
+
+    def commit(self, message, asynchronous):
+        self.commits.append(message.offset())
+
+    def seek(self, tp):
+        self.seeks.append((tp.topic, tp.partition, tp.offset))
+
+
+class FakeRecord(FakeMessage):
+    def __init__(self, value, offset):
+        super().__init__(value)
+        self._offset = offset
+
+    def partition(self):
+        return 0
+
+    def offset(self):
+        return self._offset
+
+
+class RedisOutageTest(unittest.TestCase):
+    def setUp(self):
+        self.fake = FakeRedis()
+        self.store = store_on(self.fake)
+        self.kafka = FakeKafkaConsumer()
+        self.pauses = []
+        self.tracer = TracerProvider().get_tracer("test")
+
+    def deliver(self, msg):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ok = c.handle_record(msg, self.kafka, self.store, self.tracer, pause=self.pauses.append)
+        return ok, buf.getvalue()
+
+    def test_outage_does_not_commit_then_resumes_without_loss(self):
+        msgs = [FakeRecord(json.dumps(good(event_id=e)), i) for i, e in enumerate((EID, EID2))]
+        self.fake.down = True
+        ok, out = self.deliver(msgs[0])
+        self.assertFalse(ok)
+        self.assertEqual(self.kafka.commits, [])
+        self.assertEqual(self.kafka.seeks, [("tenant-alpha.readings", 0, 0)])
+        self.assertEqual(self.pauses, [c.RETRY_PAUSE_SECONDS])
+        self.assertIn("will retry", out)
+        self.assertNotIn("event processed", out)
+
+        self.fake.down = False
+        for m in msgs:
+            self.assertTrue(self.deliver(m)[0])
+        self.assertEqual(self.kafka.commits, [0, 1])
+
+    def test_error_log_does_not_contain_the_password(self):
+        env = {"REDIS_HOST": "127.0.0.1", "REDIS_PORT": "1", "REDIS_PASSWORD": "s3cr3t-pw"}
+        with mock.patch.dict(os.environ, env):
+            self.store = c.DedupStore.from_env()
+        ok, out = self.deliver(FakeRecord(json.dumps(good()), 0))
+        self.assertFalse(ok)
+        self.assertNotIn("s3cr3t-pw", out)
+        self.assertEqual(self.kafka.commits, [])
+
+    def test_duplicate_and_invalid_records_are_committed(self):
+        self.assertTrue(self.deliver(FakeRecord(json.dumps(good()), 0))[0])
+        self.assertTrue(self.deliver(FakeRecord(json.dumps(good()), 1))[0])
+        self.assertTrue(self.deliver(FakeRecord(b"junk", 2))[0])
+        self.assertEqual(self.kafka.commits, [0, 1, 2])
 
 
 if __name__ == "__main__":
