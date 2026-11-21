@@ -6,19 +6,30 @@ locals {
   region     = split(":", var.kms_key_arn)[3]
   account_id = split(":", var.kms_key_arn)[4]
 
+  # Only EKS Pod Identity in this account may assume the roles (confused-deputy guard).
   pod_identity_trust = jsonencode({
     Version = "2012-10-17"
     Statement = [{
       Effect    = "Allow"
       Principal = { Service = "pods.eks.amazonaws.com" }
       Action    = ["sts:AssumeRole", "sts:TagSession"]
+      Condition = { StringEquals = { "aws:SourceAccount" = local.account_id } }
     }]
   })
+
+  # RDS names its managed master secret rds!db-<id>, outside the platform prefix; the
+  # database bootstrap job needs it, so it is granted by exact ARN.
+  extra_secret_statements = length(var.extra_secret_arns) == 0 ? [] : [{
+    Sid      = "ReadNamedSecrets"
+    Effect   = "Allow"
+    Action   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    Resource = var.extra_secret_arns
+  }]
 
   policies = {
     external-secrets = jsonencode({
       Version = "2012-10-17"
-      Statement = [
+      Statement = concat([
         {
           Sid      = "ReadPlatformSecrets"
           Effect   = "Allow"
@@ -32,7 +43,7 @@ locals {
           Resource  = var.kms_key_arn
           Condition = { StringEquals = { "kms:ViaService" = "secretsmanager.${local.region}.amazonaws.com" } }
         }
-      ]
+      ], local.extra_secret_statements)
     })
 
     tempo = jsonencode({

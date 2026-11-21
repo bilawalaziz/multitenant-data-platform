@@ -33,3 +33,9 @@ variable "service_accounts" {
     tempo            = { namespace = "observability", name = "tempo" }
   }
 }
+
+variable "extra_secret_arns" {
+  description = "Secrets outside the platform prefix that External Secrets may read, by exact ARN (for example the RDS-managed master secret)"
+  type        = list(string)
+  default     = []
+}

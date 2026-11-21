@@ -50,6 +50,8 @@ module "iam" {
   secrets_prefix   = var.name
   kms_key_arn      = module.kms.key_arn
   tempo_bucket_arn = module.s3.bucket_arn
+  # The database bootstrap job reads the RDS master secret through External Secrets.
+  extra_secret_arns = module.rds[*].master_user_secret_arn
 }
 
 module "eks" {
