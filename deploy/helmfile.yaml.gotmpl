@@ -110,6 +110,12 @@ releases:
     set:
       - name: image.registry
         value: {{ .Values.registry }}
+{{- if $local }}
+      - name: image.app.tag
+        value: {{ .Values.imageTag | quote }}
+      - name: image.consumer.tag
+        value: {{ .Values.imageTag | quote }}
+{{- end }}
 
   # Keycloak waits for sensor-platform because the bootstrap hook creates its role and database.
   - name: keycloak
