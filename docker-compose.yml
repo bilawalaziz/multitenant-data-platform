@@ -57,7 +57,10 @@ services:
   redis:
     image: redis:7.4.12-alpine
     # AOF keeps rate limit state across a restart. maxmemory stays below mem_limit so Redis evicts instead of
-    # being OOM-killed; volatile-ttl only evicts keys that expire (all bucket keys do), preferring the soonest.
+    # being OOM-killed; volatile-ttl only evicts keys that expire (all of ours do), preferring the soonest.
+    # Sizing: the consumer's dedup keys cost about 150 bytes each and live DEDUP_TTL_SECONDS (7 days), so they need
+    # about 150 B x events/s x 604800 s (roughly 90 MB per event/s). 96mb is for the demo (well under 1 event/s);
+    # raise maxmemory and mem_limit together, keeping maxmemory about 25% below mem_limit, before ingesting more.
     command:
       - redis-server
       - --appendonly
@@ -211,17 +214,21 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       otel-collector:
         condition: service_started
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       TOPICS: ${CONSUMER_TOPICS:-tenant-alpha.readings,tenant-beta.readings}
       GROUP_ID: ${CONSUMER_GROUP_ID:-sensor-readings-consumer}
-      DEDUP_DB_PATH: /data/dedup.sqlite
+      # Shared with the application's rate limiter; dedup state lives here so replicas see each other's events.
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set in .env}
+      DEDUP_TTL_SECONDS: ${CONSUMER_DEDUP_TTL_SECONDS:-604800}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_SERVICE_NAME: sensor-consumer
-    volumes:
-      - consumer-data:/data
     restart: unless-stopped
     mem_limit: 192m
 
@@ -232,4 +239,3 @@ volumes:
   prometheus-data:
   grafana-data:
   tempo-data:
-  consumer-data:
