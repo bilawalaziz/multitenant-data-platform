@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.platform.ingestion.common.ApiException;
 import com.platform.ingestion.ingestion.IngestionDtos.IngestionResponse;
+import com.platform.ingestion.observability.OutboxTracing;
 import com.platform.ingestion.persistence.IngestionRecord;
 import com.platform.ingestion.persistence.IngestionRecordRepository;
 import com.platform.ingestion.persistence.OutboxEvent;
@@ -38,11 +39,17 @@ public class IngestionWriter {
     private final IdempotencyService idempotency;
     private final IngestionRecordRepository records;
     private final OutboxRepository outbox;
+    private final OutboxTracing tracing;
 
-    public IngestionWriter(IdempotencyService idempotency, IngestionRecordRepository records, OutboxRepository outbox) {
+    public IngestionWriter(
+            IdempotencyService idempotency,
+            IngestionRecordRepository records,
+            OutboxRepository outbox,
+            OutboxTracing tracing) {
         this.idempotency = idempotency;
         this.records = records;
         this.outbox = outbox;
+        this.tracing = tracing;
     }
 
     @Transactional
@@ -69,7 +76,8 @@ public class IngestionWriter {
                 r.tenant().kafkaTopic(),
                 r.deviceId(),
                 r.canonicalEvent(),
-                r.receivedAt()));
+                r.receivedAt(),
+                tracing.currentTraceParent()));
         return new WriteOutcome(false, r.ingestionId());
     }
 

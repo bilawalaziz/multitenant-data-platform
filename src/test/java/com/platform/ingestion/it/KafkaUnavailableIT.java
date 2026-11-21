@@ -113,7 +113,8 @@ class KafkaUnavailableIT extends AbstractIntegrationTest {
                 clock,
                 new OutboxProperties(true, 1000, 50, 50, 1000, 30000, Duration.ofSeconds(60), Duration.ofSeconds(10)),
                 new PlatformKafkaProperties(3, (short) 1, 1500, 4000),
-                springKafka(1500));
+                springKafka(1500),
+                tracing);
 
         assertThat(offline.publishDue()).isZero();
 

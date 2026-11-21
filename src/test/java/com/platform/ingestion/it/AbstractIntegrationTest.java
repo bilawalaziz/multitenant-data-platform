@@ -7,6 +7,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.platform.ingestion.messaging.OutboxPublisher;
+import com.platform.ingestion.observability.OutboxTracing;
 import com.platform.ingestion.persistence.OutboxEvent;
 import com.platform.ingestion.persistence.OutboxRepository;
 import com.platform.ingestion.tenant.TenantScope;
@@ -51,7 +52,9 @@ import org.testcontainers.utility.DockerImageName;
             "platform.retention.enabled=false",
             // Starting Redis for every test class buys nothing; RateLimitIT opts back in.
             "platform.rate-limit.enabled=false",
-            "platform.kafka.admin-timeout-ms=10000"
+            "platform.kafka.admin-timeout-ms=10000",
+            // Spans are still created and propagated; only the export to a collector that does not exist is off.
+            "management.otlp.tracing.export.enabled=false"
         })
 @AutoConfigureMockMvc
 @AutoConfigureObservability
@@ -105,6 +108,9 @@ public abstract class AbstractIntegrationTest {
 
     @Autowired
     protected OutboxPublisher outboxPublisher;
+
+    @Autowired
+    protected OutboxTracing tracing;
 
     @Autowired
     protected TestSupportConfig.TogglingEventPublisher toggling;
