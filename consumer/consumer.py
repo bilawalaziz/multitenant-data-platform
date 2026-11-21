@@ -31,6 +31,8 @@ from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+from redis.backoff import NoBackoff
+from redis.retry import Retry
 
 REQUIRED_FIELDS = {
     "event_id": str,
@@ -156,12 +158,15 @@ class DedupStore:
     @classmethod
     def from_env(cls):
         # Connections are made lazily, so a Redis that is down at startup is retried per message, not fatal.
+        # The client's own retries are off: they would multiply the timeout (about 25 s per message when Redis
+        # hangs) and outlast a container's stop grace period. The consumer loop already retries the message.
         client = redis.Redis(
             host=os.environ.get("REDIS_HOST", "localhost"),
             port=int(os.environ.get("REDIS_PORT", "6379")),
             password=os.environ.get("REDIS_PASSWORD") or None,
             socket_connect_timeout=REDIS_TIMEOUT_SECONDS,
             socket_timeout=REDIS_TIMEOUT_SECONDS,
+            retry=Retry(NoBackoff(), 0),
             decode_responses=True,
         )
         return cls(client, int(os.environ.get("DEDUP_TTL_SECONDS", DEFAULT_DEDUP_TTL_SECONDS)))
@@ -242,7 +247,7 @@ def handle_record(msg, consumer, store, tracer, pause=time.sleep):
     except Exception as e:  # infrastructure failure: do not commit, rewind and retry
         log("ERROR", "processing failed; offset not committed, will retry", error=repr(e), **meta)
         consumer.seek(TopicPartition(msg.topic(), msg.partition(), msg.offset()))
-        # Redis calls already wait up to the socket timeout; this pause keeps a long outage from spinning.
+        # A Redis call waits at most the socket timeout (no client retries); this pause keeps an outage from spinning.
         pause(RETRY_PAUSE_SECONDS)
         return False
     consumer.commit(message=msg, asynchronous=False)

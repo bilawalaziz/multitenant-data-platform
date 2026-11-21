@@ -162,6 +162,8 @@ class DedupTest(unittest.TestCase):
         kw = store.client.connection_pool.connection_kwargs
         self.assertEqual((kw["host"], kw["port"], kw["password"]), ("r", 6380, "pw"))
         self.assertEqual((kw["socket_timeout"], kw["socket_connect_timeout"]), (2, 2))
+        # client-side retries would turn the 2 s timeout into about 25 s per message during an outage
+        self.assertEqual(kw["retry"].get_retries(), 0)
         self.assertEqual(store.ttl_seconds, 30)
 
     def test_event_id_that_is_not_a_uuid_is_invalid_and_never_reaches_redis(self):
