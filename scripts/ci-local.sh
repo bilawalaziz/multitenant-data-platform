@@ -46,6 +46,7 @@ build() {
 
 consumer() {
   docker run --rm -v "$REPO":/repo -w /repo "$PYTHON_SLIM_IMAGE" bash -c '
+    pip install -q --no-cache-dir --root-user-action=ignore -r consumer/requirements.txt &&
     python -m unittest discover -s consumer -v &&
     python -m py_compile scripts/demo.py'
 }
