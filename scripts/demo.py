@@ -6,6 +6,7 @@ Usage:
     python scripts/demo.py 6 7 8          # run selected scenarios by number
     python scripts/demo.py ingest-alpha   # or by name (see SCENARIOS below)
     python scripts/demo.py list
+    python scripts/demo.py all --target k8s   # against the k3d cluster of scripts/aws-local.sh (default: compose)
 
 Configuration (environment variables or a .env file in the project root):
     APP_URL (http://localhost:8080)  MANAGEMENT_URL (http://localhost:8081)  KEYCLOAK_URL (http://localhost:8180)
@@ -14,6 +15,10 @@ Configuration (environment variables or a .env file in the project root):
     DEMO_USER_PASSWORD  ALPHA_INGEST_CLIENT_SECRET  BETA_INGEST_CLIENT_SECRET
     DB_APP_PASSWORD (scenario rls: psql as the application role through docker compose)
     DEMO_FORCE_UPLOAD=1 uploads a new contract version even if an active one exists.
+
+With --target k8s (or DEMO_TARGET=k8s) the URLs are the ingress hosts (override with the same variables in the
+environment, not .env; LOCAL_HTTP_PORT if the ingress is not on port 80), the credentials are read from the cluster
+Secrets, and logs, scaling, psql and the Kafka outage go through kubectl in the helper container of aws-local.sh.
 
 Every ingestion uses a fresh uuid-based Idempotency-Key, so the demo is re-runnable. Device secrets are kept in
 memory and in the git-ignored .demo-state.json, and are never printed. Scenario 20 scales the consumer to two replicas
@@ -35,7 +40,26 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-STATE_FILE = os.path.join(ROOT, ".demo-state.json")
+
+
+def _target():
+    argv = sys.argv[1:]
+    for i, a in enumerate(argv):
+        if a == "--target" and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith("--target="):
+            return a.split("=", 1)[1]
+    return os.environ.get("DEMO_TARGET", "compose")
+
+
+TARGET = _target()
+if TARGET not in ("compose", "k8s"):
+    raise SystemExit("unknown --target %r (compose or k8s)" % TARGET)
+K8S = TARGET == "k8s"
+# The cluster has its own device credentials; keeping them apart leaves the compose demo's state alone.
+STATE_FILE = (
+    os.path.join(ROOT, ".scratch", "aws-local", "demo-state.json") if K8S else os.path.join(ROOT, ".demo-state.json")
+)
 RUN_ID = uuid.uuid4().hex[:8]
 
 
@@ -56,16 +80,58 @@ def load_env_file(path):
 _ENV = load_env_file(os.path.join(ROOT, ".env"))
 
 
+# Secrets of the cluster target: (Secret, key) per setting, read once with kubectl and never printed.
+K8S_NS = "sensor-platform"
+K8S_SECRET_KEYS = {
+    "DEMO_USER_PASSWORD": ("keycloak-realm-secrets", "DEMO_USER_PASSWORD"),
+    "ALPHA_INGEST_CLIENT_SECRET": ("keycloak-realm-secrets", "ALPHA_INGEST_CLIENT_SECRET"),
+    "BETA_INGEST_CLIENT_SECRET": ("keycloak-realm-secrets", "BETA_INGEST_CLIENT_SECRET"),
+    "DB_APP_USER": ("sensor-platform-app-secrets", "DB_USER"),
+    "DB_APP_PASSWORD": ("sensor-platform-app-secrets", "DB_PASSWORD"),
+}
+_K8S_SECRET_CACHE = {}
+KUBECTL_CONTAINER = os.environ.get("KUBECTL_CONTAINER", "sensor-local-kubectl")
+
+
+def k8s_secret(secret, key):
+    if secret not in _K8S_SECRET_CACHE:
+        rc, out = kubectl("get", "secret", secret, "-o", "json")
+        try:
+            data = json.loads(out)["data"] if rc == 0 else {}
+        except (ValueError, KeyError):
+            data = {}
+        import base64
+
+        _K8S_SECRET_CACHE[secret] = {k: base64.b64decode(v).decode("utf-8") for k, v in data.items()}
+    return _K8S_SECRET_CACHE[secret].get(key)
+
+
 def cfg(name, default=None):
+    if K8S:
+        # .env belongs to the compose stack; only the environment may override a cluster setting.
+        if name in K8S_SECRET_KEYS:
+            return os.environ.get(name) or k8s_secret(*K8S_SECRET_KEYS[name]) or default
+        return os.environ.get(name) or default
     return os.environ.get(name) or _ENV.get(name) or default
 
 
-APP = cfg("APP_URL", "http://localhost:%s" % cfg("APP_HOST_PORT", "8080")).rstrip("/")
-MGMT = cfg("MANAGEMENT_URL", "http://localhost:8081").rstrip("/")
-KC = cfg("KEYCLOAK_URL", "http://localhost:%s" % cfg("KEYCLOAK_HOST_PORT", "8180")).rstrip("/")
-PROM = cfg("PROMETHEUS_URL", "http://localhost:%s" % cfg("PROMETHEUS_HOST_PORT", "9090")).rstrip("/")
-GRAFANA = cfg("GRAFANA_URL", "http://localhost:%s" % cfg("GRAFANA_HOST_PORT", "3000")).rstrip("/")
-TEMPO = cfg("TEMPO_URL", "http://localhost:%s" % cfg("TEMPO_HOST_PORT", "3200")).rstrip("/")
+if K8S:
+    _ingress_port = os.environ.get("LOCAL_HTTP_PORT", "80")
+    _suffix = "" if _ingress_port == "80" else ":" + _ingress_port
+    APP = cfg("APP_URL", "http://sensor.localtest.me" + _suffix).rstrip("/")
+    KC = cfg("KEYCLOAK_URL", "http://keycloak.localtest.me" + _suffix).rstrip("/")
+    GRAFANA = cfg("GRAFANA_URL", "http://grafana.localtest.me" + _suffix).rstrip("/")
+    # Management, Prometheus and Tempo have no ingress: they are read through the Kubernetes API service proxy.
+    MGMT = cfg("MANAGEMENT_URL", "kube-proxy://sensor-platform/sensor-platform-app:8081").rstrip("/")
+    PROM = cfg("PROMETHEUS_URL", "kube-proxy://observability/prometheus-server:80").rstrip("/")
+    TEMPO = cfg("TEMPO_URL", "kube-proxy://observability/tempo:3200").rstrip("/")
+else:
+    APP = cfg("APP_URL", "http://localhost:%s" % cfg("APP_HOST_PORT", "8080")).rstrip("/")
+    MGMT = cfg("MANAGEMENT_URL", "http://localhost:8081").rstrip("/")
+    KC = cfg("KEYCLOAK_URL", "http://localhost:%s" % cfg("KEYCLOAK_HOST_PORT", "8180")).rstrip("/")
+    PROM = cfg("PROMETHEUS_URL", "http://localhost:%s" % cfg("PROMETHEUS_HOST_PORT", "9090")).rstrip("/")
+    GRAFANA = cfg("GRAFANA_URL", "http://localhost:%s" % cfg("GRAFANA_HOST_PORT", "3000")).rstrip("/")
+    TEMPO = cfg("TEMPO_URL", "http://localhost:%s" % cfg("TEMPO_HOST_PORT", "3200")).rstrip("/")
 TOKEN_URL = KC + "/realms/sensor-platform/protocol/openid-connect/token"
 TENANTS = {"alpha": "tenant-alpha", "beta": "tenant-beta"}
 DEVICES = {"alpha": "MACHINE-001", "beta": "MACHINE-002"}
@@ -119,6 +185,8 @@ def pretty(obj):
 # ----------------------------------------------------------------------------- HTTP
 def http(method, url, headers=None, body=None, timeout=30):
     """Returns (status, parsed_body_or_text, response_headers). Never raises on HTTP error statuses."""
+    if url.startswith("kube-proxy://"):
+        return kube_proxy_get(url, timeout)
     data = body
     if isinstance(body, (dict, list)):
         data = json.dumps(body).encode("utf-8")
@@ -139,6 +207,21 @@ def http(method, url, headers=None, body=None, timeout=30):
         return status, json.loads(text) if text.strip() else None, hdrs
     except ValueError:
         return status, text, hdrs
+
+
+def kube_proxy_get(url, timeout):
+    """GET through the API server's service proxy: kube-proxy://<namespace>/<service>:<port>/<path>."""
+    ns, _, rest = url[len("kube-proxy://") :].partition("/")
+    svc, _, path = rest.partition("/")
+    rc, out = kubectl("get", "--raw", "/api/v1/namespaces/%s/services/%s/proxy/%s" % (ns, svc, path), timeout=timeout)
+    if rc != 0:
+        m = re.search(r"\((\w+)\)", out)
+        code = {"NotFound": 404, "Forbidden": 403, "ServiceUnavailable": 503}.get(m.group(1) if m else "", 500)
+        return code, out, {}
+    try:
+        return 200, json.loads(out) if out.strip() else None, {}
+    except ValueError:
+        return 200, out, {}
 
 
 def encode_multipart(fields, files):
@@ -338,6 +421,105 @@ def compose(*args, env=None):
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
+# ----------------------------------------------------------------------------- runtime adapter (compose | k8s)
+CONSUMER_SELECTOR = "app.kubernetes.io/component=consumer"
+
+
+def kubectl(*args, namespace=K8S_NS, stdin=None, timeout=120):
+    """kubectl in the long-running helper container of aws-local.sh (a docker run per call would be too slow)."""
+    cmd = ["docker", "exec", "-i", KUBECTL_CONTAINER, "kubectl"]
+    if namespace:
+        cmd += ["-n", namespace]
+    try:
+        p = subprocess.run(
+            cmd + list(args),
+            input=stdin,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 1, str(e)
+    return p.returncode, (p.stdout or "") if p.returncode == 0 else (p.stdout or "") + (p.stderr or "")
+
+
+def rt_running_services():
+    """Names of the platform services that are up (compose service names)."""
+    if not K8S:
+        rc, out = compose("ps", "--status", "running", "--services")
+        return (set(out.split()) if rc == 0 else set()), out
+    want = {
+        "postgres": "statefulset/postgres",
+        "kafka": "statefulset/kafka",
+        "keycloak": "deployment/keycloak",
+        "app": "deployment/sensor-platform-app",
+        "consumer": "deployment/sensor-platform-consumer",
+    }
+    up = set()
+    for svc, obj in want.items():
+        rc, out = kubectl("get", obj, "-o", "jsonpath={.status.readyReplicas}/{.spec.replicas}")
+        ready, _, desired = out.partition("/")
+        if rc == 0 and ready.isdigit() and ready == desired and int(desired) > 0:
+            up.add(svc)
+    return up, "ready: %s" % sorted(up)
+
+
+def rt_kafka(action):
+    """Stops or starts the broker; returns (rc, output) once it is gone or Ready again."""
+    if not K8S:
+        return compose(action, "kafka")
+    rc, out = kubectl("scale", "statefulset/kafka", "--replicas=%d" % (0 if action == "stop" else 1))
+    if rc != 0:
+        return rc, out
+    if action == "stop":
+        return kubectl("wait", "--for=delete", "pod/kafka-0", "--timeout=120s", timeout=150)
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        rc, out = kubectl("wait", "--for=condition=Ready", "pod/kafka-0", "--timeout=30s", timeout=60)
+        if rc == 0:
+            return rc, out
+        time.sleep(3)
+    return 1, out
+
+
+def rt_consumer_logs(since):
+    """Consumer logs since a duration ('1h') or an RFC 3339 time, one 'replica | line' per line on both targets."""
+    if not K8S:
+        rc, out = compose("logs", "--since", since, "consumer")
+        return out
+    flag = "--since-time=" + since if "T" in since else "--since=" + since
+    # --tail=-1: with a selector kubectl defaults to the last 10 lines per pod.
+    rc, out = kubectl("logs", "-l", CONSUMER_SELECTOR, "--prefix", "--tail=-1", flag, "--max-log-requests=10")
+    lines = []
+    for ln in out.splitlines():
+        m = re.match(r"\[pod/([^/\]]+)/[^\]]+\] ?(.*)", ln)
+        lines.append("%s | %s" % (m.group(1), m.group(2)) if m else ln)
+    return "\n".join(lines)
+
+
+def rt_scale_consumer(n):
+    if not K8S:
+        return compose("up", "-d", "--scale", "consumer=%d" % n, "--no-deps", "--no-recreate", "consumer")
+    rc, out = kubectl("scale", "deployment/sensor-platform-consumer", "--replicas=%d" % n)
+    if rc != 0:
+        return rc, out
+    return kubectl("rollout", "status", "deployment/sensor-platform-consumer", "--timeout=180s", timeout=200)
+
+
+def rt_psql(user, password, db, statements):
+    """Runs the statements as the given role; returns (rc, output). The password travels on stdin, not in argv."""
+    args = ["-v", "ON_ERROR_STOP=1", "-U", user, "-d", db, "-tA"]
+    for stmt in statements:
+        args += ["-c", stmt]
+    if not K8S:
+        return compose("exec", "-T", "-e", "PGPASSWORD", "postgres", "psql", *args, env={"PGPASSWORD": password})
+    # -h 127.0.0.1 forces password authentication; the socket in the image is trusted.
+    script = 'read -r PGPASSWORD; export PGPASSWORD; exec psql -h 127.0.0.1 "$@"'
+    return kubectl("exec", "-i", "postgres-0", "--", "sh", "-c", script, "sh", *args, stdin=password + "\n")
+
+
 def ingest(identity, body, key=None, extra_headers=None):
     key = key or "demo-%s-%s" % (RUN_ID, uuid.uuid4().hex[:12])
     h = bearer(token(identity), {"Idempotency-Key": key})
@@ -383,10 +565,13 @@ def s01_health():
     expect("prometheus healthy", st == 200, st)
     st, _, _ = http("GET", GRAFANA + "/api/health")
     expect("grafana healthy", st == 200, st)
-    rc, out = compose("ps", "--status", "running", "--services")
-    running = set(out.split()) if rc == 0 else set()
+    running, out = rt_running_services()
     for svc in ("postgres", "kafka", "keycloak", "app", "consumer"):
-        expect("docker compose service %s running" % svc, svc in running, out.strip()[:120])
+        expect(
+            "%s service %s running" % ("kubernetes" if K8S else "docker compose", svc),
+            svc in running,
+            out.strip()[:120],
+        )
 
 
 def s02_tokens():
@@ -700,8 +885,8 @@ def _outbox(status):
 
 def s13_kafka_down():
     title(13, "Kafka outage: ingestion keeps accepting, events wait in the outbox")
-    rc, out = compose("stop", "kafka")
-    expect("docker compose stop kafka", rc == 0, out.strip()[-200:])
+    rc, out = rt_kafka("stop")
+    expect("%s stop kafka" % ("kubectl scale" if K8S else "docker compose"), rc == 0, out.strip()[-200:])
     state = load_state()
     ids = []
     for kind, val in (("alpha", 30.5), ("alpha", 31.5), ("beta", 100.0)):
@@ -753,8 +938,8 @@ def s13_kafka_down():
 
 def s14_kafka_up():
     title(14, "Kafka recovers: outbox drains, events get published")
-    rc, out = compose("start", "kafka")
-    expect("docker compose start kafka", rc == 0, out.strip()[-200:])
+    rc, out = rt_kafka("start")
+    expect("%s start kafka" % ("kubectl scale" if K8S else "docker compose"), rc == 0, out.strip()[-200:])
     ids = load_state().get("outage_event_ids") or []
     deadline = time.time() + 150
     drained = False
@@ -775,6 +960,12 @@ def s14_kafka_up():
     info("outbox stats: " + json.dumps(stats))
 
 
+def consumer_plain_logs(since):
+    if not K8S:
+        return compose("logs", "--no-log-prefix", "--since", since, "consumer")[1]
+    return "\n".join(ln.partition(" | ")[2] for ln in rt_consumer_logs(since).splitlines())
+
+
 def s15_consumer_logs():
     title(15, "Downstream consumer processed the events")
     ids = load_state().get("outage_event_ids") or []
@@ -782,7 +973,7 @@ def s15_consumer_logs():
     deadline = time.time() + 90
     while time.time() < deadline:
         # A time window rather than --tail: tail counts per replica, and a replica may hold the events of the others.
-        rc, out = compose("logs", "--no-log-prefix", "--since", "1h", "consumer")
+        out = consumer_plain_logs("1h")
         if all(i in out for i in ids):
             break
         time.sleep(5)
@@ -1001,7 +1192,7 @@ def s19_tracing():
     line = None
     deadline = time.time() + 20
     while line is None:
-        rc, out = compose("logs", "--no-log-prefix", "--since", "10m", "consumer")
+        out = consumer_plain_logs("10m")
         line = next((ln for ln in out.splitlines() if trace_id in ln and event_id in ln), None)
         if line is not None or time.time() > deadline:
             break
@@ -1012,6 +1203,18 @@ def s19_tracing():
 
 
 def running_consumers():
+    if K8S:
+        rc, out = kubectl(
+            "get",
+            "pods",
+            "-l",
+            CONSUMER_SELECTOR,
+            "-o",
+            r'jsonpath={range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].ready}{" "}'
+            r'{.metadata.deletionTimestamp}{"\n"}{end}',
+        )
+        rows = [ln.split() for ln in out.splitlines()] if rc == 0 else []
+        return [r[0] for r in rows if len(r) == 2 and r[1] == "true"]
     rc, out = compose("ps", "--status", "running", "-q", "consumer")
     return [x for x in out.split() if rc == 0 and re.fullmatch(r"[0-9a-f]{12,64}", x)]
 
@@ -1027,7 +1230,7 @@ def wait_for_consumers(n, seconds=90):
 
 def consumer_records(since):
     """Parsed JSON log records of every consumer replica since the timestamp, as (replica, record) pairs."""
-    rc, out = compose("logs", "--since", since, "consumer")
+    out = rt_consumer_logs(since)
     recs = []
     for ln in out.splitlines():
         prefix, sep, rest = ln.partition("|")
@@ -1064,6 +1267,7 @@ def s20_shared_dedup():
     title(20, "Shared deduplication: two consumer replicas split the work and process each event exactly once")
     # Generous margin: the host and the Docker VM clocks need not agree to the second.
     since = datetime.fromtimestamp(time.time() - 60, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    baseline = len(running_consumers()) if K8S else 1
     try:
         # More devices per tenant spread the message keys over the topic's partitions, so both replicas get work.
         extra = ["MACHINE-%03d" % n for n in range(11, 14)]
@@ -1071,9 +1275,14 @@ def s20_shared_dedup():
             for device in extra:
                 st, cred = register_device(key, device, "Demo device for the shared-consumer scenario")
                 expect("%s device %s registered" % (key, device), bool(cred), st)
+        if K8S and baseline > 1:
+            # The cluster already runs the replicas, so no rebalance would happen: start from one, as compose does.
+            rc, out = rt_scale_consumer(1)
+            expect("consumer scaled to 1 replica first", rc == 0 and wait_for_consumers(1, 120), out.strip()[-200:])
+            since = datetime.fromtimestamp(time.time() - 5, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         # --no-deps and --no-recreate leave the rest of the stack, and the running replica, untouched.
-        rc, out = compose("up", "-d", "--scale", "consumer=2", "--no-deps", "--no-recreate", "consumer")
-        expect("docker compose up --scale consumer=2", rc == 0, out.strip()[-200:])
+        rc, out = rt_scale_consumer(2)
+        expect("%s consumer=2" % ("kubectl scale" if K8S else "docker compose up --scale"), rc == 0, out.strip()[-200:])
         expect("two consumer replicas running", wait_for_consumers(2), len(running_consumers()))
         deadline = time.time() + 90
         owners = replicas_with_assignment(since)
@@ -1107,8 +1316,12 @@ def s20_shared_dedup():
         expect("each of the 2 replicas processed at least one event", len(working) == 2, sorted(working))
         info("redeliveries skipped as duplicates: %d" % sum(len(v) for v in skipped.values()))
     finally:
-        rc, out = compose("up", "-d", "--scale", "consumer=1", "--no-deps", "--no-recreate", "consumer")
-        expect("consumer scaled back to 1 replica", rc == 0 and wait_for_consumers(1, 60), out.strip()[-200:])
+        rc, out = rt_scale_consumer(baseline)
+        expect(
+            "consumer scaled back to %d replica(s)" % baseline,
+            rc == 0 and wait_for_consumers(baseline, 90),
+            out.strip()[-200:],
+        )
 
 
 def s21_row_level_security():
@@ -1124,12 +1337,8 @@ def s21_row_level_security():
     )
 
     def psql(*sql):
-        args = ["exec", "-T", "-e", "PGPASSWORD", "postgres", "psql", "-v", "ON_ERROR_STOP=1"]
-        args += ["-U", app_user, "-d", db, "-tA"]
-        for stmt in sql:
-            args += ["-c", stmt]
-        # The password travels in the environment, not on the command line.
-        rc, out = compose(*args, env={"PGPASSWORD": password})
+        # The password travels in the environment (compose) or on stdin (kubectl), not on the command line.
+        rc, out = rt_psql(app_user, password, db, sql)
         lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
         return rc, lines[-1] if lines else None
 
@@ -1242,8 +1451,9 @@ def main(argv):
         for i, (name, fn) in enumerate(SCENARIOS, 1):
             print("%2d  %-16s %s" % (i, name, (fn.__doc__ or "").strip()))
         return 0
+    argv = [a for i, a in enumerate(argv) if not (a.startswith("--target") or (i and argv[i - 1] == "--target"))]
     selected = SCENARIOS if argv[0] == "all" else [resolve(a) for a in argv]
-    print("run id %s | app %s | keycloak %s" % (RUN_ID, APP, KC))
+    print("run id %s | target %s | app %s | keycloak %s" % (RUN_ID, TARGET, APP, KC))
     for name, fn in selected:
         try:
             fn()

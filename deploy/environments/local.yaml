@@ -5,5 +5,8 @@ region: us-east-1
 # helm/sensor-platform/values-local.yaml; this one wins because helmfile sets it last.
 registry: k3d-sensor-registry:5000
 
-# Emulator CA written by the D1 spike (deploy/spike/README.md); External Secrets mounts it to verify the endpoint.
-emulatorCaFile: ../.scratch/spike/emu-home/9297/ca.pem
+# Emulator CA written by the runner (scripts/aws-local.sh); External Secrets mounts it to verify the endpoint.
+emulatorCaFile: ../.scratch/aws-local/emu-home/9297/ca.pem
+
+# Tag of the application images; scripts/aws-local.sh passes a fresh one per build so a redeploy rolls the pods.
+imageTag: local

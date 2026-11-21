@@ -172,6 +172,29 @@ one Trivy suppression (`KSV-0014`).
 
 `helmfile -e local apply` orders the releases by `needs`: `eso-prereq` (CA ConfigMap) -> `external-secrets` ->
 `eso-config` -> `local-data` -> `sensor-platform` (hook) -> `keycloak`; the observability releases are independent.
-The emulator CA is read from `.scratch/spike/emu-home/9297/ca.pem` (`emulatorCaFile` in `environments/local.yaml`).
+The emulator CA is read from `.scratch/aws-local/emu-home/9297/ca.pem` (`emulatorCaFile` in `environments/local.yaml`).
 The Kafka SCRAM user is written when the broker's volume is first formatted; if the secret changes later, delete the
 volume (`kubectl -n sensor-platform delete pvc data-kafka-0`).
+
+## Running it locally (D4)
+
+`scripts/aws-local.sh` runs the whole local environment; only Docker is needed (Python for the demo).
+
+```bash
+docker compose -p sensor-platform stop      # compose and k3d do not fit into the 7.6 GB Docker limit together
+bash scripts/aws-local.sh up                # ~11 min cold: emulator, terraform (+ drift check), k3d, images, helmfile, wait
+bash scripts/aws-local.sh status            # pods, ingress, ExternalSecrets, terraform outputs
+bash scripts/aws-local.sh demo              # python scripts/demo.py all --target k8s
+bash scripts/aws-local.sh deploy            # after code changes: rebuild, push, helmfile apply
+bash scripts/aws-local.sh down              # removes the cluster, registry, emulator, network and local state
+docker compose -p sensor-platform start
+```
+
+- One k3d server, no agent (memory), Traefik on in k3s, host port `127.0.0.1:80`, API on `127.0.0.1:6550`, registry
+  `k3d-sensor-registry:5000` (pushed through `localhost:5001`). `up` refuses to run while compose containers run.
+- Images are tagged `local-<timestamp>` and passed to helmfile as `imageTag` so every `deploy` rolls the pods.
+- `http://sensor.localtest.me`, `keycloak.localtest.me` and `grafana.localtest.me` resolve to 127.0.0.1 through public DNS.
+  If port 80 is taken on the host the Keycloak issuer (`values-local.yaml`, `keycloak/values-local.yaml`) must change with it.
+- `demo.py --target k8s` reads the credentials from the cluster Secrets and uses kubectl in the `sensor-local-kubectl`
+  container; Prometheus, Tempo and the management port are read through the API server's service proxy.
+- Logs and tool caches stay in `.scratch/aws-local/`.
