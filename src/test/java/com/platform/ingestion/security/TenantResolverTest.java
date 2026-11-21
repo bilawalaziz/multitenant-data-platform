@@ -3,6 +3,7 @@ package com.platform.ingestion.security;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.platform.ingestion.TestJwts;
@@ -16,6 +17,7 @@ import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Stream;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -67,5 +69,17 @@ class TenantResolverTest {
                     .isInstanceOfSatisfying(
                             ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(rejected));
         }
+    }
+
+    @Test
+    void claimedTenantCodeIsValidatedWithoutTouchingTheDatabase() {
+        assertThat(resolver.claimedTenantCode(TestJwts.auth("tenant-alpha", Roles.TENANT_INGEST), "tenant-alpha"))
+                .isEqualTo("tenant-alpha");
+        assertThatThrownBy(() ->
+                        resolver.claimedTenantCode(TestJwts.auth("tenant-alpha", Roles.TENANT_INGEST), "tenant-beta"))
+                .isInstanceOfSatisfying(
+                        ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.TENANT_MISMATCH));
+
+        verifyNoInteractions(tenants);
     }
 }

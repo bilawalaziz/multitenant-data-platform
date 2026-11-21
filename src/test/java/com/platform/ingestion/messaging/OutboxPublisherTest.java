@@ -3,6 +3,9 @@ package com.platform.ingestion.messaging;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.platform.ingestion.observability.OutboxTracing;
+import io.micrometer.tracing.Tracer;
+import io.micrometer.tracing.propagation.Propagator;
 import java.time.Clock;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
@@ -25,7 +28,8 @@ class OutboxPublisherTest {
                 Clock.systemUTC(),
                 new OutboxProperties(true, 1000, 50, 50, 1000, 30000, lease, Duration.ofSeconds(10)),
                 new PlatformKafkaProperties(3, (short) 1, adminTimeoutMs, sendMs),
-                springKafka);
+                springKafka,
+                new OutboxTracing(Tracer.NOOP, Propagator.NOOP));
     }
 
     @Test

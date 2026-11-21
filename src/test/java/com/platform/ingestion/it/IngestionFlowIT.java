@@ -10,13 +10,23 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.Tracer;
+import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.sdk.trace.data.SpanData;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.function.Predicate;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -24,10 +34,12 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MvcResult;
 
@@ -39,6 +51,12 @@ class IngestionFlowIT extends AbstractIntegrationTest {
 
     @Autowired
     private MeterRegistry registry;
+
+    @Autowired
+    private Tracer tracer;
+
+    @Autowired
+    private TestSupportConfig.CapturedSpans capturedSpans;
 
     private String alphaContractId;
     private String betaContractId;
@@ -67,6 +85,11 @@ class IngestionFlowIT extends AbstractIntegrationTest {
     }
 
     private List<ConsumerRecord<String, String>> consume(String topic, int expectedAtLeast, String eventId) {
+        return consumeUntil(topic, r -> r.value().contains(eventId));
+    }
+
+    private List<ConsumerRecord<String, String>> consumeUntil(
+            String topic, Predicate<ConsumerRecord<String, String>> stop) {
         Properties props = new Properties();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers());
         props.put(ConsumerConfig.GROUP_ID_CONFIG, "it-" + UUID.randomUUID());
@@ -83,7 +106,7 @@ class IngestionFlowIT extends AbstractIntegrationTest {
             long deadline = System.currentTimeMillis() + 20_000;
             while (System.currentTimeMillis() < deadline) {
                 consumer.poll(Duration.ofMillis(500)).forEach(found::add);
-                if (found.stream().anyMatch(r -> r.value().contains(eventId))) {
+                if (found.stream().anyMatch(stop)) {
                     break;
                 }
             }
@@ -521,5 +544,160 @@ class IngestionFlowIT extends AbstractIntegrationTest {
                         .counter()
                         .count())
                 .isGreaterThanOrEqualTo(1);
+    }
+
+    private static final Pattern TRACEPARENT = Pattern.compile("00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})");
+
+    private static Matcher traceparentOf(ConsumerRecord<String, String> record) {
+        assertThat(record.headers().headers("traceparent"))
+                .as("exactly one traceparent header")
+                .hasSize(1);
+        String value = new String(record.headers().lastHeader("traceparent").value(), StandardCharsets.UTF_8);
+        Matcher m = TRACEPARENT.matcher(value);
+        assertThat(m.matches()).as("valid W3C traceparent: " + value).isTrue();
+        return m;
+    }
+
+    private ConsumerRecord<String, String> recordByEventHeader(String topic, String eventId) {
+        Predicate<ConsumerRecord<String, String>> match = r -> r.headers().lastHeader("event_id") != null
+                && eventId.equals(new String(r.headers().lastHeader("event_id").value(), StandardCharsets.UTF_8));
+        return consumeUntil(topic, match).stream()
+                .filter(match)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("event " + eventId + " not found on " + topic));
+    }
+
+    private SpanData publishSpan(String eventId) {
+        Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(
+                        capturedSpans.ended().stream().filter(s -> isPublishSpanOf(s, eventId)))
+                .hasSize(1));
+        return capturedSpans.ended().stream()
+                .filter(s -> isPublishSpanOf(s, eventId))
+                .findFirst()
+                .orElseThrow();
+    }
+
+    private static boolean isPublishSpanOf(SpanData span, String eventId) {
+        return span.getName().equals("outbox.publish")
+                && eventId.equals(span.getAttributes().get(AttributeKey.stringKey("event.id")));
+    }
+
+    private String storedTraceParent(String eventId) {
+        return jdbc.queryForObject(
+                "SELECT trace_parent FROM platform.outbox_events WHERE event_id = ?::uuid", String.class, eventId);
+    }
+
+    private JsonNode ingestWithTraceparent(String traceparent) throws Exception {
+        HttpHeaders extra = new HttpHeaders();
+        if (traceparent != null) {
+            extra.add("traceparent", traceparent);
+        }
+        MvcResult r = mvc.perform(post("/api/v1/ingestion/readings")
+                        .header("Authorization", bearer(tenantIngest(ALPHA)))
+                        .header("Idempotency-Key", uniqueKey())
+                        .headers(extra)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(demoPayload("alpha-valid.json")))
+                .andExpect(status().isAccepted())
+                .andReturn();
+        return body(r);
+    }
+
+    /** Publishes on a different thread, inside an unrelated span, as the scheduler would long after the request. */
+    private void publishLaterFromAnotherThreadInsideUnrelatedSpan(Span unrelated) throws Exception {
+        ExecutorService scheduler = Executors.newSingleThreadExecutor();
+        try {
+            scheduler
+                    .submit(() -> {
+                        try (Tracer.SpanInScope ignored = tracer.withSpan(unrelated)) {
+                            outboxPublisher.publishDue();
+                        }
+                    })
+                    .get();
+        } finally {
+            scheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    void incomingTraceparentReachesTheKafkaRecordThroughTheOutbox() throws Exception {
+        drainOutbox();
+        String traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+        String incomingSpanId = "00f067aa0ba902b7";
+        JsonNode accepted = ingestWithTraceparent("00-" + traceId + "-" + incomingSpanId + "-01");
+        String eventId = accepted.get("eventId").asText();
+
+        // the row, not the thread that handled the request, carries the context until the publisher gets to it
+        Matcher stored = TRACEPARENT.matcher(storedTraceParent(eventId));
+        assertThat(stored.matches()).isTrue();
+        assertThat(stored.group(1)).isEqualTo(traceId);
+
+        Span unrelated = tracer.nextSpan().name("unrelated-scheduler-span").start();
+        publishLaterFromAnotherThreadInsideUnrelatedSpan(unrelated);
+        unrelated.end();
+
+        Matcher header = traceparentOf(recordFor("tenant-alpha.readings", eventId));
+        assertThat(header.group(1))
+                .isEqualTo(traceId)
+                .isNotEqualTo(unrelated.context().traceId());
+        // the publish span is a new child span, not the incoming span and not the request's own span
+        assertThat(header.group(2)).isNotEqualTo(incomingSpanId).isNotEqualTo(stored.group(2));
+        SpanData span = publishSpan(eventId);
+        assertThat(span.getTraceId()).isEqualTo(traceId);
+        assertThat(span.getParentSpanId()).isEqualTo(stored.group(2));
+        assertThat(span.getSpanId()).isEqualTo(header.group(2));
+    }
+
+    /** With prod sampling most requests arrive or start unsampled; the trace must still reach the consumer. */
+    @Test
+    void unsampledIncomingTraceIsStillPropagatedWithTheSampledFlagOff() throws Exception {
+        drainOutbox();
+        String traceId = "0af7651916cd43dd8448eb211c80319c";
+        JsonNode accepted = ingestWithTraceparent("00-" + traceId + "-b7ad6b7169203331-00");
+        String eventId = accepted.get("eventId").asText();
+
+        Matcher stored = TRACEPARENT.matcher(storedTraceParent(eventId));
+        assertThat(stored.matches()).isTrue();
+        assertThat(stored.group(1)).isEqualTo(traceId);
+        assertThat(stored.group(3)).isEqualTo("00");
+
+        assertThat(outboxPublisher.publishDue()).isGreaterThanOrEqualTo(1);
+
+        Matcher header = traceparentOf(recordFor("tenant-alpha.readings", eventId));
+        assertThat(header.group(1)).isEqualTo(traceId);
+        assertThat(header.group(3)).isEqualTo("00");
+    }
+
+    @Test
+    void withoutAnIncomingTraceparentANewTraceIsStartedAndPropagated() throws Exception {
+        drainOutbox();
+        String eventId = ingestWithTraceparent(null).get("eventId").asText();
+        Matcher stored = TRACEPARENT.matcher(storedTraceParent(eventId));
+        assertThat(stored.matches()).isTrue();
+
+        assertThat(outboxPublisher.publishDue()).isGreaterThanOrEqualTo(1);
+
+        Matcher header = traceparentOf(recordFor("tenant-alpha.readings", eventId));
+        assertThat(header.group(1)).isNotEqualTo("0".repeat(32)).isEqualTo(stored.group(1));
+        assertThat(header.group(2)).isNotEqualTo("0".repeat(16)).isNotEqualTo(stored.group(2));
+        assertThat(publishSpan(eventId).getParentSpanId()).isEqualTo(stored.group(2));
+        // a different request starts a different trace
+        String other = ingestWithTraceparent(null).get("eventId").asText();
+        assertThat(storedTraceParent(other)).doesNotContain(stored.group(1));
+    }
+
+    @Test
+    void aRowWithoutStoredContextStartsARootPublishTrace() throws Exception {
+        drainOutbox();
+        UUID eventId = newOutboxRow(ALPHA, "MACHINE-001", Instant.now().minusSeconds(5));
+        Span unrelated = tracer.nextSpan().name("unrelated-scheduler-span").start();
+        publishLaterFromAnotherThreadInsideUnrelatedSpan(unrelated);
+        unrelated.end();
+
+        Matcher header = traceparentOf(recordByEventHeader("tenant-alpha.readings", eventId.toString()));
+        assertThat(header.group(1)).isNotEqualTo(unrelated.context().traceId());
+        SpanData span = publishSpan(eventId.toString());
+        assertThat(span.getParentSpanContext().isValid()).isFalse();
+        assertThat(span.getTraceId()).isEqualTo(header.group(1));
     }
 }

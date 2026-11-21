@@ -4,12 +4,15 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.platform.ingestion.common.ApiException;
 import com.platform.ingestion.ingestion.IngestionDtos.IngestionResponse;
+import com.platform.ingestion.observability.OutboxTracing;
 import com.platform.ingestion.persistence.IngestionRecord;
 import com.platform.ingestion.persistence.IngestionRecordRepository;
 import com.platform.ingestion.persistence.OutboxEvent;
 import com.platform.ingestion.persistence.OutboxRepository;
+import com.platform.ingestion.security.DeviceBindingPolicy;
 import com.platform.ingestion.tenant.TenantContext;
 import java.time.Instant;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -36,11 +39,17 @@ public class IngestionWriter {
     private final IdempotencyService idempotency;
     private final IngestionRecordRepository records;
     private final OutboxRepository outbox;
+    private final OutboxTracing tracing;
 
-    public IngestionWriter(IdempotencyService idempotency, IngestionRecordRepository records, OutboxRepository outbox) {
+    public IngestionWriter(
+            IdempotencyService idempotency,
+            IngestionRecordRepository records,
+            OutboxRepository outbox,
+            OutboxTracing tracing) {
         this.idempotency = idempotency;
         this.records = records;
         this.outbox = outbox;
+        this.tracing = tracing;
     }
 
     @Transactional
@@ -67,14 +76,17 @@ public class IngestionWriter {
                 r.tenant().kafkaTopic(),
                 r.deviceId(),
                 r.canonicalEvent(),
-                r.receivedAt()));
+                r.receivedAt(),
+                tracing.currentTraceParent()));
         return new WriteOutcome(false, r.ingestionId());
     }
 
     @Transactional(readOnly = true)
-    public IngestionResponse replayResponse(UUID tenantId, UUID ingestionId) {
+    public IngestionResponse replayResponse(UUID tenantId, UUID ingestionId, Optional<String> boundDevice) {
         IngestionRecord record = records.findByIdAndTenantId(ingestionId, tenantId)
                 .orElseThrow(() -> ApiException.notFound("Ingestion"));
+        // Without this a device could read another device's stored result by reusing its idempotency key.
+        DeviceBindingPolicy.requireSameDevice(boundDevice, record.getDeviceId());
         JsonNode event = record.getCanonicalEvent();
         return new IngestionResponse(
                 "DUPLICATE",

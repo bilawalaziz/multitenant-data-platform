@@ -18,8 +18,11 @@ import com.platform.ingestion.ingestion.IngestionWriter.WriteOutcome;
 import com.platform.ingestion.ingestion.IngestionWriter.WriteRequest;
 import com.platform.ingestion.observability.MdcKeys;
 import com.platform.ingestion.observability.PlatformMetrics;
+import com.platform.ingestion.ratelimit.RateLimiter;
+import com.platform.ingestion.security.DeviceBindingPolicy;
 import com.platform.ingestion.security.TenantResolver;
 import com.platform.ingestion.tenant.TenantContext;
+import com.platform.ingestion.tenant.TenantScope;
 import com.platform.ingestion.transformation.MappedFields;
 import com.platform.ingestion.transformation.MappingEngine;
 import com.platform.ingestion.validation.SchemaValidationService;
@@ -51,7 +54,9 @@ public class IngestionService {
     private final SchemaValidationService validation;
     private final MappingEngine mappingEngine;
     private final DeviceService devices;
+    private final DeviceBindingPolicy deviceBinding;
     private final IngestionWriter writer;
+    private final RateLimiter rateLimiter;
     private final PlatformMetrics metrics;
     private final Clock clock;
     private final int maxPayloadBytes;
@@ -65,7 +70,9 @@ public class IngestionService {
             SchemaValidationService validation,
             MappingEngine mappingEngine,
             DeviceService devices,
+            DeviceBindingPolicy deviceBinding,
             IngestionWriter writer,
+            RateLimiter rateLimiter,
             PlatformMetrics metrics,
             Clock clock,
             ObjectMapper objectMapper,
@@ -76,7 +83,9 @@ public class IngestionService {
         this.validation = validation;
         this.mappingEngine = mappingEngine;
         this.devices = devices;
+        this.deviceBinding = deviceBinding;
         this.writer = writer;
+        this.rateLimiter = rateLimiter;
         this.metrics = metrics;
         this.clock = clock;
         this.maxPayloadBytes = maxPayloadBytes;
@@ -120,9 +129,25 @@ public class IngestionService {
 
     private IngestionResult process(
             Authentication authentication, String tenantHint, String idempotencyKey, byte[] body) {
+        // Both limits use only the token's claims, so a rejected request costs no database query and a flooding
+        // tenant or device cannot exhaust the connection pool.
+        String tenantCode = tenantResolver.claimedTenantCode(authentication, tenantHint);
+        MDC.put(MdcKeys.TENANT_ID, tenantCode);
+        rateLimiter.checkTenant(tenantCode);
+        Optional<String> boundDevice = deviceBinding.boundDevice(authentication);
+        // A device credential names its device up front; a tenant-wide one is limited once the payload is mapped.
+        if (boundDevice.isPresent()) {
+            rateLimiter.checkDevice(tenantCode, boundDevice.get());
+        }
         TenantContext tenant = tenantResolver.resolve(authentication, tenantHint);
-        MDC.put(MdcKeys.TENANT_ID, tenant.code());
+        // Opened before the first tenant-owned query and before the writer's transaction takes its connection.
+        try (TenantScope ignored = TenantScope.tenant(tenant.id())) {
+            return processInScope(tenant, boundDevice, idempotencyKey, body);
+        }
+    }
 
+    private IngestionResult processInScope(
+            TenantContext tenant, Optional<String> boundDevice, String idempotencyKey, byte[] body) {
         String key = idempotency.requireValidKey(idempotencyKey);
         if (body == null || body.length == 0) {
             throw new ApiException(ErrorCode.MALFORMED_REQUEST, "Request body is empty");
@@ -139,7 +164,7 @@ public class IngestionService {
 
         Optional<UUID> replay = idempotency.findReplay(tenant.id(), key, hash);
         if (replay.isPresent()) {
-            return duplicate(tenant, replay.get());
+            return duplicate(tenant, boundDevice, replay.get());
         }
 
         ActiveContract contract = contractResolver.resolveActive(tenant);
@@ -153,6 +178,10 @@ public class IngestionService {
         }
 
         MappedFields fields = mappingEngine.map(payload, contract.mapping());
+        if (boundDevice.isEmpty()) {
+            rateLimiter.checkDevice(tenant.code(), fields.deviceId());
+        }
+        DeviceBindingPolicy.requireSameDevice(boundDevice, fields.deviceId());
         devices.requireActiveDevice(tenant.id(), fields.deviceId());
 
         UUID ingestionId = UUID.randomUUID();
@@ -175,7 +204,7 @@ public class IngestionService {
                 canonical,
                 receivedAt));
         if (outcome.duplicate()) {
-            return duplicate(tenant, outcome.ingestionId());
+            return duplicate(tenant, boundDevice, outcome.ingestionId());
         }
         log.info("Accepted reading for device {} (contract v{})", fields.deviceId(), contract.version());
         return new IngestionResult(
@@ -190,8 +219,8 @@ public class IngestionService {
                         receivedAt));
     }
 
-    private IngestionResult duplicate(TenantContext tenant, UUID originalIngestionId) {
-        return new IngestionResult(true, writer.replayResponse(tenant.id(), originalIngestionId));
+    private IngestionResult duplicate(TenantContext tenant, Optional<String> boundDevice, UUID originalIngestionId) {
+        return new IngestionResult(true, writer.replayResponse(tenant.id(), originalIngestionId, boundDevice));
     }
 
     private JsonNode parse(byte[] body) {

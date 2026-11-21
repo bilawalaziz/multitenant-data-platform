@@ -8,12 +8,15 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.platform.ingestion.TestJwts;
+import com.platform.ingestion.common.ApiException;
+import com.platform.ingestion.common.ErrorCode;
 import com.platform.ingestion.contract.ContractResolver;
 import com.platform.ingestion.contract.ContractResolver.ActiveContract;
 import com.platform.ingestion.device.DeviceService;
@@ -22,6 +25,8 @@ import com.platform.ingestion.ingestion.IngestionDtos.IngestionResult;
 import com.platform.ingestion.ingestion.IngestionWriter.WriteOutcome;
 import com.platform.ingestion.ingestion.IngestionWriter.WriteRequest;
 import com.platform.ingestion.observability.PlatformMetrics;
+import com.platform.ingestion.ratelimit.RateLimiter;
+import com.platform.ingestion.security.DeviceBindingPolicy;
 import com.platform.ingestion.security.Roles;
 import com.platform.ingestion.security.TenantResolver;
 import com.platform.ingestion.tenant.TenantContext;
@@ -43,6 +48,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 
 class IngestionServiceTest {
 
@@ -53,6 +59,7 @@ class IngestionServiceTest {
     private final MappingEngine mappingEngine = mock(MappingEngine.class);
     private final DeviceService devices = mock(DeviceService.class);
     private final IngestionWriter writer = mock(IngestionWriter.class);
+    private final RateLimiter rateLimiter = mock(RateLimiter.class);
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private final PlatformMetrics metrics = new PlatformMetrics(registry);
     private final Clock clock = Clock.fixed(Instant.parse("2026-11-17T14:30:01.123456Z"), ZoneOffset.UTC);
@@ -87,11 +94,14 @@ class IngestionServiceTest {
                 validation,
                 mappingEngine,
                 devices,
+                new DeviceBindingPolicy(true),
                 writer,
+                rateLimiter,
                 metrics,
                 clock,
                 new ObjectMapper(),
                 1024);
+        when(tenantResolver.claimedTenantCode(any(), any())).thenReturn("tenant-alpha");
         when(tenantResolver.resolve(any(), any())).thenReturn(tenant);
         when(idempotency.requireValidKey(any())).thenAnswer(i -> i.getArgument(0));
         when(idempotency.hash(any())).thenReturn("hash");
@@ -146,11 +156,68 @@ class IngestionServiceTest {
     void raceLostInsideTransactionAlsoYieldsDuplicate() {
         UUID original = UUID.randomUUID();
         doReturn(new WriteOutcome(true, original)).when(writer).write(any());
-        when(writer.replayResponse(tenant.id(), original))
+        when(writer.replayResponse(tenant.id(), original, Optional.empty()))
                 .thenReturn(new IngestionResponse(
                         "DUPLICATE", original, UUID.randomUUID(), "tenant-alpha", contractId, 3, Instant.now()));
 
         assertThat(service.ingest(auth, null, "key-1", body("{}")).duplicate()).isTrue();
+    }
+
+    @Test
+    void deviceTokenForAnotherDeviceIsRejectedBeforeRegistryAndWrite() {
+        Authentication otherDevice = new JwtAuthenticationToken(
+                TestJwts.jwt("device-client", "tenant-alpha", "MACHINE-999", List.of("tenant-ingest")));
+
+        assertThatThrownBy(() -> service.ingest(otherDevice, null, "key-1", body("{}")))
+                .isInstanceOfSatisfying(
+                        ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.DEVICE_MISMATCH));
+        verify(devices, never()).requireActiveDevice(any(), any());
+        verify(writer, never()).write(any());
+        assertThat(count("ingestion.rejections", "reason", "DEVICE_MISMATCH")).isEqualTo(1);
+    }
+
+    @Test
+    void replayIsCheckedAgainstTheDeviceOfTheToken() {
+        UUID original = UUID.randomUUID();
+        when(idempotency.findReplay(any(), any(), any())).thenReturn(Optional.of(original));
+        when(writer.replayResponse(tenant.id(), original, Optional.of("MACHINE-999")))
+                .thenThrow(new ApiException(ErrorCode.DEVICE_MISMATCH, "mismatch"));
+        Authentication otherDevice = new JwtAuthenticationToken(
+                TestJwts.jwt("device-client", "tenant-alpha", "MACHINE-999", List.of("tenant-ingest")));
+
+        assertThatThrownBy(() -> service.ingest(otherDevice, null, "key-1", body("{}")))
+                .isInstanceOfSatisfying(
+                        ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.DEVICE_MISMATCH));
+    }
+
+    @Test
+    void tenantLimitIsEnforcedBeforeAnyTenantLookup() {
+        doThrow(new ApiException(ErrorCode.RATE_LIMITED, "limited"))
+                .when(rateLimiter)
+                .checkTenant("tenant-alpha");
+
+        assertThatThrownBy(() -> service.ingest(auth, null, "key-1", body("{}")))
+                .isInstanceOfSatisfying(
+                        ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.RATE_LIMITED));
+
+        verify(tenantResolver, never()).resolve(any(), any());
+        verify(writer, never()).write(any());
+        assertThat(count("ingestion.rejections", "reason", "RATE_LIMITED")).isEqualTo(1);
+    }
+
+    @Test
+    void deviceLimitFromTheTokenIsEnforcedBeforeAnyTenantLookup() {
+        doThrow(new ApiException(ErrorCode.RATE_LIMITED, "limited"))
+                .when(rateLimiter)
+                .checkDevice("tenant-alpha", "MACHINE-001");
+        Authentication deviceToken = new JwtAuthenticationToken(
+                TestJwts.jwt("device-client", "tenant-alpha", "MACHINE-001", List.of("tenant-ingest")));
+
+        assertThatThrownBy(() -> service.ingest(deviceToken, null, "key-1", body("{}")))
+                .isInstanceOfSatisfying(
+                        ApiException.class, e -> assertThat(e.errorCode()).isEqualTo(ErrorCode.RATE_LIMITED));
+
+        verify(tenantResolver, never()).resolve(any(), any());
     }
 
     @Test

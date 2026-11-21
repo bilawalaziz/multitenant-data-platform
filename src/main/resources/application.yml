@@ -7,14 +7,16 @@ spring:
     name: sensor-ingestion-platform
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5433/sensor_platform}
-    username: ${DB_USER:sensor}
-    password: ${DB_PASSWORD:sensor_dev_pw}
+    # The application role is not the table owner and is subject to row-level security.
+    username: ${DB_USER:sensor_app}
+    password: ${DB_PASSWORD:sensor_app_dev_pw}
     hikari:
       maximum-pool-size: 10
       connection-timeout: 5000
       data-source-properties:
-        # Server-side limits for every pooled connection, including Flyway. A migration that needs longer
-        # (for example an index build on a large table) raises its own limit with SET LOCAL statement_timeout.
+        # Server-side limits for every connection of the application pool. Flyway opens its own connection as the
+        # migration role and does not get these; a migration that sets its own limit (SET LOCAL statement_timeout)
+        # keeps working either way.
         options: "-c statement_timeout=${DB_STATEMENT_TIMEOUT_MS:15000} -c lock_timeout=${DB_LOCK_TIMEOUT_MS:5000}"
   task:
     scheduling:
@@ -32,10 +34,24 @@ spring:
           time_zone: UTC
   flyway:
     enabled: true
+    # Explicit so Flyway does not derive its connection from the tenant-scoped pool wrapper, which it cannot do.
+    url: ${spring.datasource.url}
     schemas: platform
     default-schema: platform
     create-schemas: true
     locations: classpath:db/migration
+    # Migrations run as the owner role; the application role only receives the grants V3 gives it.
+    user: ${DB_MIGRATION_USER:sensor}
+    password: ${DB_MIGRATION_PASSWORD:sensor_dev_pw}
+    placeholders:
+      app_role: ${DB_USER:sensor_app}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      # Bounds how long a rate limit check can delay a request when Redis is slow or unreachable.
+      timeout: 200ms
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9094}
     producer:
@@ -63,8 +79,36 @@ spring:
 platform:
   security:
     audience: sensor-platform-api
+    # Tenant-wide ingestion clients (no device_id claim) are accepted until every device has its own credential.
+    tenant-ingest-credentials-enabled: true
+  keycloak:
+    provisioner:
+      # Keycloak as reachable from the application; the client creates and manages one client per device.
+      url: ${KEYCLOAK_ADMIN_URL:http://localhost:8180}
+      realm: sensor-platform
+      client-id: ${PROVISIONER_CLIENT_ID:sensor-platform-provisioner}
+      client-secret: ${PROVISIONER_CLIENT_SECRET:}
   ingestion:
     max-payload-bytes: 65536
+  rate-limit:
+    enabled: true
+    # After a Redis failure, admit requests without limiting for this long before trying Redis again.
+    failure-cooldown: 2s
+    # Connecting runs in the background, so unlike commands (spring.data.redis.timeout) it may take a while.
+    connect-timeout: 2s
+    # Token buckets: capacity is the burst, refill-per-second the sustained rate. A device is expected to
+    # report every few seconds; a tenant's budget is sized to what the database pool can absorb.
+    tenant:
+      capacity: 400
+      refill-per-second: 200
+    device:
+      capacity: 20
+      refill-per-second: 10
+    # Per tenant code, for example:
+    # tenant-overrides:
+    #   tenant-alpha:
+    #     capacity: 1000
+    #     refill-per-second: 500
   kafka:
     topic-partitions: 3
     topic-replication-factor: 1
@@ -89,6 +133,10 @@ platform:
     max-batches-per-run: 100
 
 management:
+  health:
+    # Rate limiting fails open, so Redis must not turn the application's health (and its container) red.
+    redis:
+      enabled: false
   server:
     # Actuator is not served on the API port; keep this port internal to the deployment network.
     port: ${MANAGEMENT_PORT:8081}
@@ -100,6 +148,24 @@ management:
     health:
       probes:
         enabled: true
+  observations:
+    enable:
+      # One trace per second from the outbox poller, and a span per security filter, would drown the request traces.
+      tasks:
+        scheduled:
+          execution: false
+      spring:
+        security: false
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
+  otlp:
+    tracing:
+      # OTEL_EXPORTER_OTLP_ENDPOINT is the collector's base URL, as in the OpenTelemetry SDKs; Boot wants the full path.
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318}/v1/traces
+      export:
+        # Spans are always created and propagated (logs and Kafka headers need them); they are only exported on request.
+        enabled: ${TRACING_EXPORT_ENABLED:false}
   metrics:
     distribution:
       percentiles-histogram:
@@ -127,6 +193,14 @@ spring:
     url: ${DB_URL}
     username: ${DB_USER}
     password: ${DB_PASSWORD}
+  flyway:
+    user: ${DB_MIGRATION_USER}
+    password: ${DB_MIGRATION_PASSWORD}
+  data:
+    redis:
+      host: ${REDIS_HOST}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD}
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS}
   security:
@@ -135,10 +209,22 @@ spring:
         jwt:
           issuer-uri: ${KEYCLOAK_ISSUER_URI}
           jwk-set-uri: ${KEYCLOAK_JWK_SET_URI}
+platform:
+  security:
+    tenant-ingest-credentials-enabled: false
+  keycloak:
+    provisioner:
+      url: ${KEYCLOAK_ADMIN_URL}
+      client-id: ${PROVISIONER_CLIENT_ID}
+      client-secret: ${PROVISIONER_CLIENT_SECRET}
 logging:
   structured:
     format:
       console: logstash
+management:
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:0.1}
 
 ---
 spring:

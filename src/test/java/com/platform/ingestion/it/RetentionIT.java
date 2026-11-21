@@ -36,7 +36,7 @@ class RetentionIT extends AbstractIntegrationTest {
 
     private RetentionJob job(int batchSize, int maxBatches) {
         return new RetentionJob(
-                jdbc,
+                appJdbc,
                 tx,
                 metrics,
                 Clock.systemUTC(),

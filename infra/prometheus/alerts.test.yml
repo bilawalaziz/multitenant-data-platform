@@ -173,3 +173,30 @@ tests:
               job: sensor-ingestion-platform
             exp_annotations:
               summary: "Prometheus has no scrape target for the ingestion service"
+
+  - name: rate limiter degraded
+    interval: 1m
+    input_series:
+      - series: "ratelimit_errors_total"
+        values: "0+30x15"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RateLimiterDegraded
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RateLimiterDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Rate limiting is failing open because the limiter store is unavailable"
+
+  - name: healthy rate limiter does not alert
+    interval: 1m
+    input_series:
+      - series: "ratelimit_errors_total"
+        values: "4x15"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RateLimiterDegraded
+        exp_alerts: []

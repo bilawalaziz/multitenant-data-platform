@@ -15,11 +15,27 @@ public final class DeviceDtos {
                     String deviceId,
             @Size(max = 255) String description) {}
 
-    public record DeviceResponse(String deviceId, String description, String status, Instant createdAt) {
+    public record DeviceResponse(
+            String deviceId, String description, String status, Instant createdAt, String clientId) {
 
         static DeviceResponse from(Device d) {
             return new DeviceResponse(
-                    d.getDeviceId(), d.getDescription(), d.getStatus().name(), d.getCreatedAt());
+                    d.getDeviceId(),
+                    d.getDescription(),
+                    d.getStatus().name(),
+                    d.getCreatedAt(),
+                    d.getCredentialClientId());
         }
     }
+
+    /** Returned once at registration: the secret cannot be read back later, only replaced by rotating it. */
+    public record RegisteredDeviceResponse(
+            String deviceId,
+            String description,
+            String status,
+            Instant createdAt,
+            String clientId,
+            String clientSecret) {}
+
+    public record DeviceCredentialsResponse(String deviceId, String clientId, String clientSecret) {}
 }

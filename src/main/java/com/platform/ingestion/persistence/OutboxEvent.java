@@ -55,10 +55,25 @@ public class OutboxEvent extends PersistableEntity {
     @Column(name = "published_at")
     private Instant publishedAt;
 
+    @Column(name = "trace_parent", updatable = false)
+    private String traceParent;
+
     protected OutboxEvent() {}
 
     public OutboxEvent(
             UUID id, UUID tenantId, UUID eventId, String topic, String messageKey, JsonNode payload, Instant now) {
+        this(id, tenantId, eventId, topic, messageKey, payload, now, null);
+    }
+
+    public OutboxEvent(
+            UUID id,
+            UUID tenantId,
+            UUID eventId,
+            String topic,
+            String messageKey,
+            JsonNode payload,
+            Instant now,
+            String traceParent) {
         this.id = id;
         this.tenantId = tenantId;
         this.eventId = eventId;
@@ -69,6 +84,7 @@ public class OutboxEvent extends PersistableEntity {
         this.attempts = 0;
         this.nextAttemptAt = now;
         this.createdAt = now;
+        this.traceParent = traceParent;
     }
 
     /** Pushes next_attempt_at forward so other publishers skip the row while it is being published. */
@@ -129,5 +145,9 @@ public class OutboxEvent extends PersistableEntity {
 
     public Instant getPublishedAt() {
         return publishedAt;
+    }
+
+    public String getTraceParent() {
+        return traceParent;
     }
 }

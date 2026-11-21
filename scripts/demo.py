@@ -2,7 +2,7 @@
 """End-to-end demo of the multi-tenant sensor ingestion platform (stdlib only, cross-platform).
 
 Usage:
-    python scripts/demo.py all            # run the 16 scenarios in order
+    python scripts/demo.py all            # run all scenarios in order
     python scripts/demo.py 6 7 8          # run selected scenarios by number
     python scripts/demo.py ingest-alpha   # or by name (see SCENARIOS below)
     python scripts/demo.py list
@@ -10,15 +10,20 @@ Usage:
 Configuration (environment variables or a .env file in the project root):
     APP_URL (http://localhost:8080)  MANAGEMENT_URL (http://localhost:8081)  KEYCLOAK_URL (http://localhost:8180)
     PROMETHEUS_URL (http://localhost:9090)  GRAFANA_URL (http://localhost:3000)
+    TEMPO_URL (http://localhost:3200)
     DEMO_USER_PASSWORD  ALPHA_INGEST_CLIENT_SECRET  BETA_INGEST_CLIENT_SECRET
+    DB_APP_PASSWORD (scenario rls: psql as the application role through docker compose)
     DEMO_FORCE_UPLOAD=1 uploads a new contract version even if an active one exists.
 
-Every ingestion uses a fresh uuid-based Idempotency-Key, so the demo is re-runnable. Exit code is non-zero if any
-expectation failed.
+Every ingestion uses a fresh uuid-based Idempotency-Key, so the demo is re-runnable. Device secrets are kept in
+memory and in the git-ignored .demo-state.json, and are never printed. Scenario 20 scales the consumer to two replicas
+and back. Exit code is non-zero if any expectation failed.
 """
 
 import json
 import os
+import random
+import re
 import subprocess
 import sys
 import time
@@ -26,6 +31,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -59,9 +65,16 @@ MGMT = cfg("MANAGEMENT_URL", "http://localhost:8081").rstrip("/")
 KC = cfg("KEYCLOAK_URL", "http://localhost:%s" % cfg("KEYCLOAK_HOST_PORT", "8180")).rstrip("/")
 PROM = cfg("PROMETHEUS_URL", "http://localhost:%s" % cfg("PROMETHEUS_HOST_PORT", "9090")).rstrip("/")
 GRAFANA = cfg("GRAFANA_URL", "http://localhost:%s" % cfg("GRAFANA_HOST_PORT", "3000")).rstrip("/")
+TEMPO = cfg("TEMPO_URL", "http://localhost:%s" % cfg("TEMPO_HOST_PORT", "3200")).rstrip("/")
 TOKEN_URL = KC + "/realms/sensor-platform/protocol/openid-connect/token"
 TENANTS = {"alpha": "tenant-alpha", "beta": "tenant-beta"}
 DEVICES = {"alpha": "MACHINE-001", "beta": "MACHINE-002"}
+# Second alpha device, used as the "other device" in the mismatch and rate-limit scenarios, and a device that only
+# exists to be flooded so the limit does not eat the budget of the devices the other scenarios use.
+SPARE_DEVICE = "MACHINE-003"
+BURST_DEVICE = "MACHINE-004"
+# The device identities that ingest with their own Keycloak client (see device_credentials).
+DEVICE_IDENT = {k: "device:%s:%s" % (k, d) for k, d in DEVICES.items()}
 
 
 # ----------------------------------------------------------------------------- output / expectations
@@ -156,12 +169,72 @@ def bearer(tok, extra=None):
 
 
 # ----------------------------------------------------------------------------- tokens
-_TOKENS = {}
+_TOKENS = {}  # identity -> (access token, expiry in epoch seconds)
+_DEVICE_CREDS = {}  # "tenant/device" -> {"clientId", "clientSecret"}; never printed
+
+
+def fetch_token(form):
+    status, body, _ = http(
+        "POST", TOKEN_URL, {"Content-Type": "application/x-www-form-urlencoded"}, urllib.parse.urlencode(form)
+    )
+    return status, body
+
+
+def remember_device_credentials(slot, body):
+    cred = {"clientId": body["clientId"], "clientSecret": body["clientSecret"]}
+    _DEVICE_CREDS[slot] = cred
+    state = load_state()
+    state.setdefault("device_credentials", {})[slot] = cred
+    save_state(state)
+    return cred
+
+
+def device_credentials(key, device_id, fresh=False):
+    """Credentials of a registered device: from memory or the state file, else a new secret from the API.
+
+    The secret of an existing device cannot be read back, only replaced, so a missing or rejected one is rotated.
+    """
+    slot = "%s/%s" % (TENANTS[key], device_id)
+    if not fresh:
+        cred = _DEVICE_CREDS.get(slot) or load_state().get("device_credentials", {}).get(slot)
+        if cred:
+            _DEVICE_CREDS[slot] = cred
+            return cred
+    st, body, _ = http(
+        "POST",
+        APP + "/api/v1/tenants/%s/devices/%s/credentials" % (TENANTS[key], device_id),
+        bearer(token("platform-admin")),
+    )
+    if st != 200 or not isinstance(body, dict) or not body.get("clientSecret"):
+        info("credentials for %s not issued: %s" % (slot, st))
+        return None
+    _TOKENS.pop("device:%s:%s" % (key, device_id), None)
+    return remember_device_credentials(slot, body)
+
+
+def register_device(key, device_id, description="Demo device"):
+    """Registers a device and returns (status, credentials). A 409 means it exists, so its secret is replaced."""
+    st, body, _ = http(
+        "POST",
+        APP + "/api/v1/tenants/%s/devices" % TENANTS[key],
+        bearer(token("platform-admin")),
+        {"deviceId": device_id, "description": description},
+    )
+    if st == 201 and isinstance(body, dict) and body.get("clientSecret"):
+        return st, remember_device_credentials("%s/%s" % (TENANTS[key], device_id), body)
+    if st == 409:
+        return st, device_credentials(key, device_id, fresh=True)
+    return st, None
+
+
+def device_form(cred):
+    return {"grant_type": "client_credentials", "client_id": cred["clientId"], "client_secret": cred["clientSecret"]}
 
 
 def token(identity):
-    if identity in _TOKENS:
-        return _TOKENS[identity]
+    cached = _TOKENS.get(identity)
+    if cached and cached[1] > time.time() + 30:
+        return cached[0]
     if identity in ("platform-admin", "alpha-admin", "beta-admin"):
         form = {
             "grant_type": "password",
@@ -169,6 +242,7 @@ def token(identity):
             "username": identity,
             "password": cfg("DEMO_USER_PASSWORD", ""),
         }
+        status, body = fetch_token(form)
     elif identity in ("alpha-ingest", "beta-ingest"):
         t = identity.split("-")[0]
         form = {
@@ -176,15 +250,24 @@ def token(identity):
             "client_id": "tenant-%s-ingest" % t,
             "client_secret": cfg("%s_INGEST_CLIENT_SECRET" % t.upper(), ""),
         }
+        status, body = fetch_token(form)
+    elif identity.startswith("device:"):
+        _, key, device_id = identity.split(":", 2)
+        status, body = 0, None
+        # A remembered secret may predate a rotation, so one rejection is followed by a fresh secret.
+        for fresh in (False, True):
+            cred = device_credentials(key, device_id, fresh=fresh)
+            if cred:
+                status, body = fetch_token(device_form(cred))
+                if status == 200:
+                    break
     else:
         raise ValueError(identity)
-    status, body, _ = http(
-        "POST", TOKEN_URL, {"Content-Type": "application/x-www-form-urlencoded"}, urllib.parse.urlencode(form)
-    )
     if status != 200 or not isinstance(body, dict) or "access_token" not in body:
+        # The body of a failed token request holds an error, not a secret.
         raise RuntimeError("token request for %s failed: %s %s" % (identity, status, body))
-    _TOKENS[identity] = body["access_token"]
-    return _TOKENS[identity]
+    _TOKENS[identity] = (body["access_token"], time.time() + int(body.get("expires_in", 60)))
+    return body["access_token"]
 
 
 def decode_jwt(tok):
@@ -237,10 +320,19 @@ def pick(d, *names):
     return None
 
 
-def compose(*args, check=False):
+def compose(*args, env=None):
     cmd = ["docker", "compose"] + list(args)
     try:
-        p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=300)
+        p = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+            env=dict(os.environ, **env) if env else None,
+        )
     except (OSError, subprocess.TimeoutExpired) as e:
         return 1, str(e)
     return p.returncode, (p.stdout or "") + (p.stderr or "")
@@ -317,7 +409,7 @@ def s02_tokens():
 
 
 def s03_register():
-    title(3, "Register tenants and devices (idempotent: 409 = already exists)")
+    title(3, "Register tenants and devices, each device with its own credential (409 = already exists)")
     adm = token("platform-admin")
     for key, tid in TENANTS.items():
         st, body, _ = http(
@@ -327,13 +419,9 @@ def s03_register():
             {"tenantId": tid, "displayName": "Tenant " + key.capitalize()},
         )
         expect("register %s (201 or already exists 409)" % tid, st in (201, 409), (st, body))
-        st, body, _ = http(
-            "POST",
-            APP + "/api/v1/tenants/%s/devices" % tid,
-            bearer(adm),
-            {"deviceId": DEVICES[key], "description": "Demo machine of " + tid},
-        )
-        expect("register device %s for %s (201/409)" % (DEVICES[key], tid), st in (201, 409), (st, body))
+        # The secret is returned only at registration, and a rerun gets 409, so the secret is replaced then.
+        st, cred = register_device(key, DEVICES[key], "Demo machine of " + tid)
+        expect("register device %s for %s (201, or 409 and a new secret)" % (DEVICES[key], tid), bool(cred), st)
     st, body, _ = http("GET", APP + "/api/v1/admin/tenants", bearer(adm))
     codes = [pick(t, "tenantId", "tenantCode", "id") for t in as_list(body)]
     expect("tenant list contains both tenants", all(t in codes for t in TENANTS.values()), codes)
@@ -401,9 +489,16 @@ def _ingest_step(kind, n, label):
     tid = TENANTS[kind]
     p = payload("%s-valid.json" % kind)
     info("payload: " + json.dumps(p))
-    st, resp, key, _ = ingest("%s-ingest" % kind, p)
+    # The device's own Keycloak client, not the tenant-wide one: the token names tenant and device.
+    claims = decode_jwt(token(DEVICE_IDENT[kind]))
+    expect(
+        "%s device token carries tenant_id and device_id" % kind,
+        claims.get("tenant_id") == tid and claims.get("device_id") == DEVICES[kind],
+        (claims.get("tenant_id"), claims.get("device_id")),
+    )
+    st, resp, key, _ = ingest(DEVICE_IDENT[kind], p)
     ok = expect(
-        "%s ingest -> 202 ACCEPTED" % kind,
+        "%s ingest with the device credential -> 202 ACCEPTED" % kind,
         st == 202 and isinstance(resp, dict) and resp.get("status") == "ACCEPTED",
         (st, resp),
     )
@@ -610,7 +705,7 @@ def s13_kafka_down():
     state = load_state()
     ids = []
     for kind, val in (("alpha", 30.5), ("alpha", 31.5), ("beta", 100.0)):
-        st, resp, _, _ = ingest("%s-ingest" % kind, fresh_reading(kind, val))
+        st, resp, _, _ = ingest(DEVICE_IDENT[kind], fresh_reading(kind, val))
         expect("%s reading accepted while Kafka is down -> 202" % kind, st == 202, (st, resp))
         if st == 202:
             ids.append(resp.get("eventId"))
@@ -686,7 +781,8 @@ def s15_consumer_logs():
     out = ""
     deadline = time.time() + 90
     while time.time() < deadline:
-        rc, out = compose("logs", "--no-log-prefix", "--tail", "200", "consumer")
+        # A time window rather than --tail: tail counts per replica, and a replica may hold the events of the others.
+        rc, out = compose("logs", "--no-log-prefix", "--since", "1h", "consumer")
         if all(i in out for i in ids):
             break
         time.sleep(5)
@@ -714,11 +810,34 @@ def s16_observability():
     info("Prometheus: %s  (targets: %s/targets)" % (PROM, PROM))
     info("Swagger UI: %s/swagger-ui.html" % APP)
     time.sleep(6)  # allow one more scrape
+    st, body, _ = http("GET", PROM + "/api/v1/targets?state=active")
+    targets = body.get("data", {}).get("activeTargets", []) if st == 200 and isinstance(body, dict) else []
+    expect(
+        "prometheus scrapes the application target and it is up",
+        any(t.get("labels", {}).get("job") == "sensor-ingestion-platform" and t.get("health") == "up" for t in targets),
+        [(t.get("labels", {}).get("job"), t.get("health")) for t in targets],
+    )
+    st, body, _ = http("GET", PROM + "/api/v1/rules?type=alert")
+    rules = [
+        r
+        for g in (body.get("data", {}).get("groups", []) if st == 200 and isinstance(body, dict) else [])
+        for r in g.get("rules", [])
+    ]
+    info("alert rules loaded: %s" % ", ".join(sorted(r.get("name", "?") for r in rules)))
+    # Names are checked rather than a count, so adding a rule does not break the demo.
+    expect(
+        "alert rules loaded without errors, including RateLimiterDegraded",
+        bool(rules)
+        and all(r.get("health") != "err" for r in rules)
+        and any(r.get("name") == "RateLimiterDegraded" for r in rules),
+        [(r.get("name"), r.get("health")) for r in rules],
+    )
     for q in (
         "sum by (outcome) (ingestion_requests_total)",
         "sum by (result) (outbox_publish_total)",
         "outbox_pending_events",
         "sum by (reason) (ingestion_rejections_total)",
+        "sum(ratelimit_errors_total)",
     ):
         res = prom_query(q)
         shown = [
@@ -727,6 +846,268 @@ def s16_observability():
         info("%-52s %s" % (q, shown))
         if q.startswith(("sum by (outcome)", "sum by (result)")):
             expect("prometheus has data for %s" % q.split("(")[-1].rstrip(")").split()[-1], bool(res), res)
+
+
+def reading_for(kind, device_id, value):
+    """A fresh reading naming a specific device of the tenant."""
+    p = fresh_reading(kind, value)
+    p["deviceId" if kind == "alpha" else "device_code"] = device_id
+    return p
+
+
+def header(hdrs, name):
+    return next((v for k, v in (hdrs or {}).items() if k.lower() == name.lower()), None)
+
+
+def s17_device_credentials():
+    title(17, "Per-device credentials: a device token cannot submit another device's reading")
+    own, other = DEVICES["alpha"], SPARE_DEVICE
+    st, cred = register_device("alpha", other, "Second alpha device")
+    expect("second alpha device %s registered with its own credential" % other, bool(cred), st)
+    if not cred:
+        return
+    own_ident, other_ident = DEVICE_IDENT["alpha"], "device:alpha:%s" % other
+
+    st, resp, _, _ = ingest(own_ident, reading_for("alpha", other, 61.5))
+    expect(
+        "%s token sending a %s reading -> 403 DEVICE_MISMATCH" % (own, other),
+        st == 403 and isinstance(resp, dict) and resp.get("errorCode") == "DEVICE_MISMATCH",
+        (st, resp),
+    )
+    info(pretty(resp))
+    st, resp, _, _ = ingest(own_ident, reading_for("alpha", own, 61.5))
+    expect("%s token sending its own reading -> 202" % own, st == 202, (st, resp))
+    st, resp, _, _ = ingest(other_ident, reading_for("alpha", other, 62.5))
+    expect("%s token sending its own reading -> 202" % other, st == 202, (st, resp))
+    st, resp, _, _ = ingest("alpha-ingest", reading_for("alpha", other, 63.5))
+    expect("tenant-wide token still accepted outside production -> 202", st == 202, (st, resp))
+
+    # Deactivation cannot be undone, so each run uses a device of its own and leaves it behind inactive.
+    spare, spare_cred = None, None
+    for _ in range(8):
+        candidate = "MACHINE-%03d" % random.randint(500, 899)
+        st, spare_cred = register_device("alpha", candidate, "Demo device that is deactivated")
+        if st == 201 and spare_cred:
+            spare = candidate
+            break
+    if not expect("a device to deactivate registered", spare is not None):
+        return
+    ident = "device:alpha:%s" % spare
+    st, resp, _, _ = ingest(ident, reading_for("alpha", spare, 20.5))
+    expect("%s accepted while active -> 202" % spare, st == 202, (st, resp))
+    st, resp, _ = http(
+        "POST",
+        APP + "/api/v1/tenants/tenant-alpha/devices/%s/deactivate" % spare,
+        bearer(token("platform-admin")),
+    )
+    expect("deactivate %s -> 200 INACTIVE" % spare, st == 200 and (resp or {}).get("status") == "INACTIVE", (st, resp))
+    # The token issued before deactivation is still valid; the device registry is what rejects it.
+    st, resp, _, _ = ingest(ident, reading_for("alpha", spare, 21.5))
+    expect(
+        "deactivated device with its existing token -> 422 DEVICE_NOT_REGISTERED",
+        st == 422 and isinstance(resp, dict) and resp.get("errorCode") == "DEVICE_NOT_REGISTERED",
+        (st, resp),
+    )
+    st, _ = fetch_token(device_form(spare_cred))
+    expect("deactivated device's client is refused a new token", st != 200, st)
+
+
+def s18_rate_limit():
+    title(18, "Rate limiting: one device is throttled, its neighbour is not")
+    st, burst_cred = register_device("alpha", BURST_DEVICE, "Device that is flooded")
+    st2, _ = register_device("alpha", SPARE_DEVICE, "Second alpha device")
+    if not expect("burst device and neighbour registered", bool(burst_cred) and st2 in (201, 409), (st, st2)):
+        return
+    burst_ident, calm_ident = "device:alpha:%s" % BURST_DEVICE, "device:alpha:%s" % SPARE_DEVICE
+    token(burst_ident)  # fetched up front so the burst measures the limiter, not Keycloak
+    token(calm_ident)
+
+    # Concurrent, because a sequential loop may refill (10/s) about as fast as it spends and never hit the limit.
+    def send(i):
+        return ingest(burst_ident, reading_for("alpha", BURST_DEVICE, 40.0 + i % 10))
+
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        results = list(pool.map(send, range(60)))
+    codes = [r[0] for r in results]
+    info(
+        "60 requests for one device: %d accepted, %d limited, other statuses %s"
+        % (codes.count(202), codes.count(429), sorted(set(codes) - {202, 429}))
+    )
+    limited = [r for r in results if r[0] == 429]
+    expect("requests within the burst capacity were accepted -> 202", codes.count(202) >= 1, codes)
+    expect("requests beyond the device limit -> 429", len(limited) >= 1, sorted(set(codes)))
+    if limited:
+        resp, hdrs = limited[0][1], limited[0][3]
+        expect(
+            "429 carries errorCode RATE_LIMITED",
+            isinstance(resp, dict) and resp.get("errorCode") == "RATE_LIMITED",
+            resp,
+        )
+        retry = header(hdrs, "Retry-After")
+        expect("429 carries a Retry-After of at least 1 second", str(retry).isdigit() and int(retry) >= 1, retry)
+        info("Retry-After: %s" % retry)
+    expect("only 202 and 429 during the burst (tenant limit not reached)", set(codes) <= {202, 429}, sorted(set(codes)))
+    st, resp, _, _ = ingest(calm_ident, reading_for("alpha", SPARE_DEVICE, 55.5))
+    expect("another device of the same tenant is still accepted -> 202", st == 202, (st, resp))
+    # The device bucket refills 10/s; waiting lets it recover before a rerun or the next scenario uses it.
+    time.sleep(2.5)
+
+
+def tempo_spans(doc):
+    """(service, span name) pairs of a Tempo trace, in either OTLP JSON layout (batches, or resourceSpans)."""
+    if not isinstance(doc, dict):
+        return []
+    batches = doc.get("batches") or doc.get("resourceSpans") or (doc.get("trace") or {}).get("resourceSpans") or []
+    out = []
+    for b in batches:
+        attrs = (b.get("resource") or {}).get("attributes") or []
+        service = next((a["value"].get("stringValue") for a in attrs if a.get("key") == "service.name"), None)
+        for scope in b.get("scopeSpans") or b.get("instrumentationLibrarySpans") or []:
+            out.extend((service, sp.get("name")) for sp in scope.get("spans") or [])
+    return out
+
+
+def s19_tracing():
+    title(19, "Tracing: one trace from the HTTP request through the outbox to the consumer")
+    trace_id, parent_id = uuid.uuid4().hex, uuid.uuid4().hex[:16]
+    st, resp, _, _ = ingest(
+        DEVICE_IDENT["alpha"],
+        fresh_reading("alpha", 77.5),
+        extra_headers={"traceparent": "00-%s-%s-01" % (trace_id, parent_id)},
+    )
+    if not expect("reading with a traceparent accepted -> 202", st == 202, (st, resp)):
+        return
+    event_id = resp.get("eventId")
+    info("trace id %s, event id %s" % (trace_id, event_id))
+    wanted = {
+        "application HTTP span": lambda s, n: s == "sensor-ingestion-platform"
+        and (n or "").lower().startswith("http "),
+        "outbox.publish span": lambda s, n: n == "outbox.publish",
+        "consumer span": lambda s, n: s == "sensor-consumer" and n == "sensor-readings process",
+    }
+    spans, missing = [], list(wanted)
+    deadline = time.time() + 40
+    while time.time() < deadline:
+        st, doc, _ = http("GET", "%s/api/traces/%s" % (TEMPO, trace_id), {"Accept": "application/json"})
+        if st == 200:
+            spans = tempo_spans(doc)
+            missing = [k for k, match in wanted.items() if not any(match(s, n) for s, n in spans)]
+            if not missing:
+                break
+        time.sleep(2)
+    info("spans in the trace: %s" % sorted(set("%s / %s" % sp for sp in spans)))
+    for name in wanted:
+        expect("trace in Tempo contains the %s" % name, name not in missing, "missing: %s" % missing)
+    line = None
+    deadline = time.time() + 20
+    while line is None:
+        rc, out = compose("logs", "--no-log-prefix", "--since", "10m", "consumer")
+        line = next((ln for ln in out.splitlines() if trace_id in ln and event_id in ln), None)
+        if line is not None or time.time() > deadline:
+            break
+        time.sleep(2)
+    expect("consumer log line for the event carries this trace_id", line is not None and '"trace_id"' in line)
+    if line:
+        info(line[:230])
+
+
+def running_consumers():
+    rc, out = compose("ps", "--status", "running", "-q", "consumer")
+    return [x for x in out.split() if rc == 0 and re.fullmatch(r"[0-9a-f]{12,64}", x)]
+
+
+def wait_for_consumers(n, seconds=90):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if len(running_consumers()) == n:
+            return True
+        time.sleep(3)
+    return False
+
+
+def consumer_tally(since, ids):
+    """event_id -> [replica, ...] for 'event processed' and for 'duplicate event skipped' log lines."""
+    rc, out = compose("logs", "--since", since, "consumer")
+    processed, skipped = {}, {}
+    for ln in out.splitlines():
+        prefix, sep, rest = ln.partition("|")
+        brace = rest.find("{")
+        if not sep or brace < 0:
+            continue
+        try:
+            rec = json.loads(rest[brace:])
+        except ValueError:
+            continue
+        target = {"event processed": processed, "duplicate event skipped": skipped}.get(rec.get("msg"))
+        if target is not None and rec.get("event_id") in ids:
+            target.setdefault(rec["event_id"], []).append(prefix.strip())
+    return processed, skipped
+
+
+def s20_shared_dedup():
+    title(20, "Shared deduplication: two consumer replicas process each event exactly once")
+    # Generous margin: the host and the Docker VM clocks need not agree to the second.
+    since = datetime.fromtimestamp(time.time() - 60, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        # --no-deps and --no-recreate leave the rest of the stack, and the running replica, untouched.
+        rc, out = compose("up", "-d", "--scale", "consumer=2", "--no-deps", "--no-recreate", "consumer")
+        expect("docker compose up --scale consumer=2", rc == 0, out.strip()[-200:])
+        expect("two consumer replicas running", wait_for_consumers(2), len(running_consumers()))
+        ids = []
+        for i in range(12):
+            kind = "alpha" if i % 2 == 0 else "beta"
+            st, resp, _, _ = ingest(DEVICE_IDENT[kind], fresh_reading(kind, 80.0 + i))
+            if st == 202:
+                ids.append(resp.get("eventId"))
+        expect("12 readings with distinct event ids accepted", len(set(ids)) == 12, len(ids))
+        deadline = time.time() + 90
+        processed, skipped = consumer_tally(since, ids)
+        while time.time() < deadline and len(processed) < len(ids):
+            time.sleep(3)
+            processed, skipped = consumer_tally(since, ids)
+        # A second 'processed' for an event would be a dedup failure; give a late one a moment to show.
+        time.sleep(3)
+        processed, skipped = consumer_tally(since, ids)
+        expect("every event was processed", len(processed) == len(ids), "%d of %d" % (len(processed), len(ids)))
+        twice = {e: r for e, r in processed.items() if len(r) != 1}
+        expect("no event processed more than once across replicas", not twice, twice)
+        info("replicas that processed events: %s" % sorted({r[0] for r in processed.values()}))
+        info("redeliveries skipped as duplicates: %d" % sum(len(v) for v in skipped.values()))
+    finally:
+        rc, out = compose("up", "-d", "--scale", "consumer=1", "--no-deps", "--no-recreate", "consumer")
+        expect("consumer scaled back to 1 replica", rc == 0 and wait_for_consumers(1, 60), out.strip()[-200:])
+
+
+def s21_row_level_security():
+    title(21, "Row-level security: the application role sees nothing without a tenant scope")
+    password = cfg("DB_APP_PASSWORD")
+    if not password:
+        info("DB_APP_PASSWORD is not set; skipping")
+        return
+    app_user, db = cfg("DB_APP_USER", "sensor_app"), cfg("POSTGRES_DB", "sensor_platform")
+    scope = (
+        "SELECT set_config('app.tenant_id', "
+        "(SELECT id::text FROM platform.tenants WHERE tenant_code = 'tenant-alpha'), false)"
+    )
+
+    def psql(*sql):
+        args = ["exec", "-T", "-e", "PGPASSWORD", "postgres", "psql", "-v", "ON_ERROR_STOP=1"]
+        args += ["-U", app_user, "-d", db, "-tA"]
+        for stmt in sql:
+            args += ["-c", stmt]
+        # The password travels in the environment, not on the command line.
+        rc, out = compose(*args, env={"PGPASSWORD": password})
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        return rc, lines[-1] if lines else None
+
+    rc, last = psql("SELECT count(*) FROM platform.devices")
+    expect("%s without a tenant scope sees 0 devices" % app_user, rc == 0 and last == "0", (rc, last))
+    rc, last = psql(scope, "SELECT count(*) FROM platform.devices")
+    expect("scoped to tenant-alpha the same role sees devices", rc == 0 and last not in (None, "0"), (rc, last))
+    rc, last = psql(
+        scope, "SELECT count(*) FROM platform.devices WHERE tenant_id <> current_setting('app.tenant_id')::uuid"
+    )
+    expect("scoped to tenant-alpha no other tenant's device is visible", rc == 0 and last == "0", (rc, last))
 
 
 SCENARIOS = [
@@ -746,6 +1127,11 @@ SCENARIOS = [
     ("kafka-up", s14_kafka_up),
     ("consumer-logs", s15_consumer_logs),
     ("observability", s16_observability),
+    ("device-credentials", s17_device_credentials),
+    ("rate-limit", s18_rate_limit),
+    ("tracing", s19_tracing),
+    ("shared-dedup", s20_shared_dedup),
+    ("rls", s21_row_level_security),
 ]
 
 

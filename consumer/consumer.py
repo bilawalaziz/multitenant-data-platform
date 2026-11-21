@@ -5,19 +5,34 @@ validated, quality-checked and recorded for deduplication.
 
 Messages that are not valid JSON or miss canonical fields are logged as errors and committed (skipped), so one bad
 record cannot block a partition; a real deployment would send them to a dead-letter topic. Duplicates (same event_id,
-tracked in sqlite on a volume) are logged and committed. Topics that do not exist yet are tolerated because tenants
-are created at runtime; the consumer picks them up through periodic metadata refresh. Infrastructure failures such
-as a sqlite error do not commit: the consumer seeks back and retries. On SIGTERM/SIGINT it finishes the current
-message, commits and closes. All log lines are single-line JSON.
+tracked in Redis so that every replica in the consumer group shares one view) are logged and committed. Topics that
+do not exist yet are tolerated because tenants are created at runtime; the consumer picks them up through periodic
+metadata refresh. Infrastructure failures such as a Redis error or timeout do not commit: the consumer seeks back and
+retries after a pause. On SIGTERM/SIGINT it finishes the current message, commits and closes. All log lines are
+single-line JSON.
+
+Tracing: each message is handled inside a consume span that continues the trace carried in the record's W3C
+traceparent header (a new trace when there is none), and every log line written inside it carries trace_id and
+span_id. Spans are exported over OTLP/HTTP only when OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise they stay local, so
+the ids still appear in the logs but nothing is sent anywhere.
 """
 
 import json
+import logging
 import os
+import re
 import signal
-import sqlite3
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+
+import redis
+from opentelemetry import trace
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+from redis.backoff import NoBackoff
+from redis.retry import Retry
 
 REQUIRED_FIELDS = {
     "event_id": str,
@@ -35,12 +50,54 @@ REQUIRED_FIELDS = {
 }
 UNIT_RANGES = {"CELSIUS": (-50.0, 150.0), "FAHRENHEIT": (-58.0, 302.0)}
 MAX_FUTURE_SKEW = timedelta(minutes=5)
+# The producer always writes a UUID, so anything else is rejected before it can become an arbitrary or huge Redis key.
+EVENT_ID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+DEFAULT_DEDUP_TTL_SECONDS = 604800  # 7 days, the application's idempotency window
+REDIS_TIMEOUT_SECONDS = 2
+RETRY_PAUSE_SECONDS = 1
 
 
 def log(level, msg, **fields):
     rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"), "level": level, "msg": msg}
+    ctx = trace.get_current_span().get_span_context()
+    if ctx.is_valid:
+        rec["trace_id"] = trace.format_trace_id(ctx.trace_id)
+        rec["span_id"] = trace.format_span_id(ctx.span_id)
     rec.update(fields)
     print(json.dumps(rec, default=str), flush=True)
+
+
+class _JsonLogHandler(logging.Handler):
+    """Routes the OpenTelemetry SDK's own warnings (for example an unreachable collector) into the JSON log."""
+
+    def emit(self, record):
+        level = "ERROR" if record.levelno >= logging.ERROR else "WARN"
+        log(level, record.getMessage(), logger=record.name)
+
+
+def setup_tracing():
+    """Returns (tracer, provider). Export is on only when an OTLP endpoint is configured."""
+    service = os.environ.get("OTEL_SERVICE_NAME", "sensor-consumer")
+    provider = TracerProvider(resource=Resource.create({"service.name": service}))
+    if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"):
+        # Imported here so a consumer without an endpoint never loads the HTTP client stack.
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+        sdk_logger = logging.getLogger("opentelemetry")
+        sdk_logger.addHandler(_JsonLogHandler())
+        sdk_logger.propagate = False
+        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+    return provider.get_tracer("sensor-consumer"), provider
+
+
+def trace_context_from_headers(headers):
+    """Extracts the parent context from Kafka record headers ([(name, bytes)] or None)."""
+    carrier = {}
+    for name, value in headers or []:
+        if value is not None and name in ("traceparent", "tracestate"):
+            carrier[name] = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+    return TraceContextTextMapPropagator().extract(carrier)
 
 
 def parse_ts(s):
@@ -69,6 +126,8 @@ def validate_event(ev):
     for name in ("event_timestamp", "received_at"):
         if isinstance(ev.get(name), str) and parse_ts(ev[name]) is None:
             problems.append(f"field {name} is not an ISO-8601 timestamp")
+    if isinstance(ev.get("event_id"), str) and not EVENT_ID_RE.fullmatch(ev["event_id"]):
+        problems.append("field event_id is not a UUID")
     if ev.get("metadata") is not None and not isinstance(ev["metadata"], dict):
         problems.append("field metadata must be an object")
     return problems
@@ -90,28 +149,35 @@ def dq_warnings(ev, now=None):
 
 
 class DedupStore:
-    def __init__(self, path):
-        d = os.path.dirname(path)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        self.db = sqlite3.connect(path)
-        self.db.execute(
-            "CREATE TABLE IF NOT EXISTS processed_events ("
-            "event_id TEXT PRIMARY KEY, tenant_id TEXT, processed_at TEXT)"
+    """Shared event-id registry: one Redis key per event, expiring after the idempotency window."""
+
+    def __init__(self, client, ttl_seconds=DEFAULT_DEDUP_TTL_SECONDS):
+        self.client = client
+        self.ttl_seconds = ttl_seconds
+
+    @classmethod
+    def from_env(cls):
+        # Connections are made lazily, so a Redis that is down at startup is retried per message, not fatal.
+        # The client's own retries are off: they would multiply the timeout (about 25 s per message when Redis
+        # hangs) and outlast a container's stop grace period. The consumer loop already retries the message.
+        client = redis.Redis(
+            host=os.environ.get("REDIS_HOST", "localhost"),
+            port=int(os.environ.get("REDIS_PORT", "6379")),
+            password=os.environ.get("REDIS_PASSWORD") or None,
+            socket_connect_timeout=REDIS_TIMEOUT_SECONDS,
+            socket_timeout=REDIS_TIMEOUT_SECONDS,
+            retry=Retry(NoBackoff(), 0),
+            decode_responses=True,
         )
-        self.db.commit()
+        return cls(client, int(os.environ.get("DEDUP_TTL_SECONDS", DEFAULT_DEDUP_TTL_SECONDS)))
 
     def first_seen(self, event_id, tenant_id):
-        """True if event_id was not seen before (and records it)."""
-        cur = self.db.execute(
-            "INSERT OR IGNORE INTO processed_events VALUES (?,?,?)",
-            (event_id, tenant_id, datetime.now(timezone.utc).isoformat()),
-        )
-        self.db.commit()
-        return cur.rowcount == 1
+        """True if event_id was not seen before (and records it). Redis errors propagate so the caller retries."""
+        # SET NX is atomic, so of several replicas racing on one event exactly one wins.
+        return bool(self.client.set(f"dedup:{event_id.lower()}", tenant_id, nx=True, ex=self.ttl_seconds))
 
     def close(self):
-        self.db.close()
+        self.client.close()
 
 
 def process_payload(raw, store, kafka_meta=None):
@@ -132,6 +198,8 @@ def process_payload(raw, store, kafka_meta=None):
             **meta,
         )
         return "invalid"
+    # Marked before processing. That is safe only because processing is logging: a consumer with real side effects
+    # must mark after processing, or use a two-phase (pending/done) marker, or a crash here loses the event.
     ids = {"event_id": ev["event_id"], "tenant_id": ev["tenant_id"], "device_id": ev["device_id"]}
     if not store.first_seen(ev["event_id"], ev["tenant_id"]):
         log("INFO", "duplicate event skipped", **ids, **meta)
@@ -151,8 +219,43 @@ def process_payload(raw, store, kafka_meta=None):
     return "processed"
 
 
+def process_message(raw, headers, store, kafka_meta, tracer):
+    """Process one Kafka record inside a consume span that continues the producer's trace."""
+    meta = kafka_meta or {}
+    with tracer.start_as_current_span(
+        "sensor-readings process",
+        context=trace_context_from_headers(headers),
+        kind=trace.SpanKind.CONSUMER,
+        attributes={
+            "messaging.system": "kafka",
+            "messaging.destination.name": meta.get("topic", ""),
+            "messaging.operation": "process",
+        },
+    ) as span:
+        result = process_payload(raw, store, kafka_meta)
+        span.set_attribute("consumer.result", result)
+        return result
+
+
+def handle_record(msg, consumer, store, tracer, pause=time.sleep):
+    """Process one record and commit it. On an infrastructure failure rewind instead, so the record is retried."""
+    from confluent_kafka import TopicPartition
+
+    meta = {"topic": msg.topic(), "partition": msg.partition(), "offset": msg.offset()}
+    try:
+        process_message(msg.value(), msg.headers(), store, meta, tracer)
+    except Exception as e:  # infrastructure failure: do not commit, rewind and retry
+        log("ERROR", "processing failed; offset not committed, will retry", error=repr(e), **meta)
+        consumer.seek(TopicPartition(msg.topic(), msg.partition(), msg.offset()))
+        # A Redis call waits at most the socket timeout (no client retries); this pause keeps an outage from spinning.
+        pause(RETRY_PAUSE_SECONDS)
+        return False
+    consumer.commit(message=msg, asynchronous=False)
+    return True
+
+
 def main():
-    from confluent_kafka import Consumer, KafkaException, TopicPartition
+    from confluent_kafka import Consumer, KafkaException
 
     bootstrap = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9094")
     topics = [
@@ -161,7 +264,8 @@ def main():
         if t.strip()
     ]
     group = os.environ.get("GROUP_ID", "sensor-readings-consumer")
-    store = DedupStore(os.environ.get("DEDUP_DB_PATH", "/data/dedup.sqlite"))
+    store = DedupStore.from_env()
+    tracer, tracer_provider = setup_tracing()
     running = True
 
     def stop(signum, _frame):
@@ -195,21 +299,14 @@ def main():
                 log("WARN", "kafka consumer error (continuing)", error=str(err), code=err.code())
                 time.sleep(1)
                 continue
-            meta = {"topic": msg.topic(), "partition": msg.partition(), "offset": msg.offset()}
-            try:
-                process_payload(msg.value(), store, meta)
-            except Exception as e:  # infrastructure failure: do not commit, rewind and retry
-                log("ERROR", "processing failed; offset not committed, will retry", error=repr(e), **meta)
-                consumer.seek(TopicPartition(msg.topic(), msg.partition(), msg.offset()))
-                time.sleep(1)
-                continue
-            consumer.commit(message=msg, asynchronous=False)
+            handle_record(msg, consumer, store, tracer)
     except KafkaException as e:
         log("ERROR", "fatal kafka error", error=str(e))
         return 1
     finally:
         consumer.close()
         store.close()
+        tracer_provider.shutdown()  # flushes spans still queued for export
         log("INFO", "consumer stopped")
     return 0
 

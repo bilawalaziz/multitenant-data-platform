@@ -65,8 +65,9 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      # The tests import the OpenTelemetry SDK, so they need the same pinned packages as the image.
+      - run: pip install -r consumer/requirements.txt
       - name: Unit tests
-        # The tests do not import confluent_kafka, so the requirements are not installed here.
         run: python -m unittest discover -s consumer -v
       - run: python -m py_compile scripts/demo.py
 

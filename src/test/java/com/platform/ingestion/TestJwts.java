@@ -19,6 +19,11 @@ public final class TestJwts {
 
     /** @param realmRoles Keycloak realm role names such as "tenant-admin"; tenantId may be null. */
     public static Jwt jwt(String subject, String tenantId, List<String> realmRoles) {
+        return jwt(subject, tenantId, null, realmRoles);
+    }
+
+    /** Like {@link #jwt(String, String, List)} with a device_id claim when deviceId is not null. */
+    public static Jwt jwt(String subject, String tenantId, String deviceId, List<String> realmRoles) {
         Jwt.Builder builder = Jwt.withTokenValue("test-token-" + subject)
                 .header("alg", "none")
                 .subject(subject)
@@ -30,6 +35,9 @@ public final class TestJwts {
                 .claim("realm_access", Map.of("roles", realmRoles));
         if (tenantId != null) {
             builder.claim("tenant_id", tenantId);
+        }
+        if (deviceId != null) {
+            builder.claim("device_id", deviceId);
         }
         return builder.build();
     }

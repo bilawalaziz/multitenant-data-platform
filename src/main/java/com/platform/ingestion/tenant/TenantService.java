@@ -43,7 +43,21 @@ public class TenantService {
 
     /** Record + schema are created atomically; the Kafka topic is best effort (publisher ensures it later). */
     public TenantResponse register(String tenantCode, String displayName) {
-        Tenant created = tx.execute(status -> {
+        // The tenant does not exist yet, so there is no tenant to scope to; registration runs as the platform.
+        Tenant created;
+        try (TenantScope ignored = TenantScope.system()) {
+            created = registerInScope(tenantCode, displayName);
+        }
+        if (!topicProvisioner.tryEnsureTopic(created.getKafkaTopic())) {
+            log.warn(
+                    "Kafka topic {} could not be created at registration; the outbox publisher will ensure it later",
+                    created.getKafkaTopic());
+        }
+        return TenantResponse.from(created);
+    }
+
+    private Tenant registerInScope(String tenantCode, String displayName) {
+        return tx.execute(status -> {
             if (tenants.existsByTenantCode(tenantCode)) {
                 throw new ApiException(ErrorCode.CONFLICT, "Tenant '" + tenantCode + "' already exists");
             }
@@ -59,12 +73,6 @@ public class TenantService {
             schemaManager.createTenantSchema(schemaName);
             return tenant;
         });
-        if (!topicProvisioner.tryEnsureTopic(created.getKafkaTopic())) {
-            log.warn(
-                    "Kafka topic {} could not be created at registration; the outbox publisher will ensure it later",
-                    created.getKafkaTopic());
-        }
-        return TenantResponse.from(created);
     }
 
     public List<TenantResponse> list() {

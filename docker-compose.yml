@@ -8,10 +8,14 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-sensor_platform}
       POSTGRES_USER: ${POSTGRES_USER:-sensor}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      # read by infra/postgres/init/10-app-role.sh on first start of an empty volume
+      DB_APP_USER: ${DB_APP_USER:-sensor_app}
+      DB_APP_PASSWORD: ${DB_APP_PASSWORD:?set in .env}
     ports:
       - "${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -50,6 +54,35 @@ services:
       start_period: 20s
     mem_limit: 768m
 
+  redis:
+    image: redis:7.4.12-alpine
+    # AOF keeps rate limit state across a restart. maxmemory stays below mem_limit so Redis evicts instead of
+    # being OOM-killed; volatile-ttl only evicts keys that expire (all of ours do), preferring the soonest.
+    # Sizing: the consumer's dedup keys cost about 150 bytes each and live DEDUP_TTL_SECONDS (7 days), so they need
+    # about 150 B x events/s x 604800 s (roughly 90 MB per event/s). 96mb is for the demo (well under 1 event/s);
+    # raise maxmemory and mem_limit together, keeping maxmemory about 25% below mem_limit, before ingesting more.
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:?set in .env}
+      - --maxmemory
+      - 96mb
+      - --maxmemory-policy
+      - volatile-ttl
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    environment:
+      # redis-cli reads the password from here, keeping it off the healthcheck command line
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?set in .env}
+    mem_limit: 128m
+
   keycloak:
     image: quay.io/keycloak/keycloak:26.8.2
     command: ["start-dev", "--import-realm"]
@@ -64,6 +97,7 @@ services:
       DEMO_USER_PASSWORD: ${DEMO_USER_PASSWORD:?set in .env}
       ALPHA_INGEST_CLIENT_SECRET: ${ALPHA_INGEST_CLIENT_SECRET:?set in .env}
       BETA_INGEST_CLIENT_SECRET: ${BETA_INGEST_CLIENT_SECRET:?set in .env}
+      PROVISIONER_CLIENT_SECRET: ${PROVISIONER_CLIENT_SECRET:?set in .env}
       JAVA_OPTS_KC_HEAP: "-Xms256m -Xmx512m"
     ports:
       - "${KEYCLOAK_HOST_PORT:-8180}:8080"
@@ -88,14 +122,33 @@ services:
         condition: service_healthy
       keycloak:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      # Not waited on for health: the exporter retries, and a missing collector must not stop ingestion.
+      otel-collector:
+        condition: service_started
     environment:
       DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-sensor_platform}
-      DB_USER: ${POSTGRES_USER:-sensor}
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      # runtime connections use the restricted application role; Flyway migrates as the owner
+      DB_USER: ${DB_APP_USER:-sensor_app}
+      DB_PASSWORD: ${DB_APP_PASSWORD:?set in .env}
+      DB_MIGRATION_USER: ${POSTGRES_USER:-sensor}
+      DB_MIGRATION_PASSWORD: ${POSTGRES_PASSWORD}
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set in .env}
       KEYCLOAK_ISSUER_URI: http://localhost:${KEYCLOAK_HOST_PORT:-8180}/realms/sensor-platform
       KEYCLOAK_JWK_SET_URI: http://keycloak:8080/realms/sensor-platform/protocol/openid-connect/certs
+      # per-device credentials: the app creates one Keycloak client per device through the admin API
+      KEYCLOAK_ADMIN_URL: http://keycloak:8080
+      PROVISIONER_CLIENT_ID: sensor-platform-provisioner
+      PROVISIONER_CLIENT_SECRET: ${PROVISIONER_CLIENT_SECRET:?set in .env}
       JAVA_OPTS: "-XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError -Xss512k"
+      # base URL of the collector's OTLP/HTTP receiver; the application appends /v1/traces
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      TRACING_EXPORT_ENABLED: "true"
+      TRACING_SAMPLING_PROBABILITY: ${TRACING_SAMPLING_PROBABILITY:-1.0}
     ports:
       - "${APP_HOST_PORT:-8080}:8080"
       # management port for local diagnostics only
@@ -110,6 +163,30 @@ services:
       - prometheus-data:/prometheus
     ports:
       - "${PROMETHEUS_HOST_PORT:-9090}:9090"
+    mem_limit: 384m
+
+  # No healthchecks for the next two: their images are minimal (no shell, wget or curl) to run one into.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.165.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./infra/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+    # No published ports: the application and the consumer reach it on the compose network.
+    depends_on:
+      - tempo
+    restart: unless-stopped
+    mem_limit: 256m
+
+  tempo:
+    image: grafana/tempo:2.10.10
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./infra/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      # Trace lookup by id (GET /api/traces/<id>) for the demo and for debugging; the host only.
+      - "127.0.0.1:${TEMPO_HOST_PORT:-3200}:3200"
+    restart: unless-stopped
     mem_limit: 384m
 
   grafana:
@@ -128,6 +205,7 @@ services:
       - "${GRAFANA_HOST_PORT:-3000}:3000"
     depends_on:
       - prometheus
+      - tempo
     mem_limit: 384m
 
   consumer:
@@ -136,19 +214,28 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       TOPICS: ${CONSUMER_TOPICS:-tenant-alpha.readings,tenant-beta.readings}
       GROUP_ID: ${CONSUMER_GROUP_ID:-sensor-readings-consumer}
-      DEDUP_DB_PATH: /data/dedup.sqlite
-    volumes:
-      - consumer-data:/data
+      # Shared with the application's rate limiter; dedup state lives here so replicas see each other's events.
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set in .env}
+      DEDUP_TTL_SECONDS: ${CONSUMER_DEDUP_TTL_SECONDS:-604800}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: sensor-consumer
     restart: unless-stopped
     mem_limit: 192m
 
 volumes:
   postgres-data:
   kafka-data:
+  redis-data:
   prometheus-data:
   grafana-data:
-  consumer-data:
+  tempo-data:
