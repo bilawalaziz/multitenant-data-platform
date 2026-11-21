@@ -114,7 +114,8 @@ class OutboxBatchIT extends AbstractIntegrationTest {
                 clock,
                 new OutboxProperties(true, 1000, 50, 50, 1000, 30000, Duration.ofSeconds(60), Duration.ofSeconds(10)),
                 new PlatformKafkaProperties(3, (short) 1, 5000, 5000),
-                springKafka(5000));
+                springKafka(5000),
+                tracing);
         List<String> sent = new ArrayList<>();
         // sending the second row takes "longer" than the issue deadline
         toggling.setSender(message -> {
@@ -158,7 +159,8 @@ class OutboxBatchIT extends AbstractIntegrationTest {
                 Clock.systemUTC(),
                 new OutboxProperties(true, 1000, 50, 50, 1000, 30000, Duration.ofSeconds(60), Duration.ofSeconds(10)),
                 new PlatformKafkaProperties(3, (short) 1, 1500, 1500),
-                springKafka(5000));
+                springKafka(5000),
+                tracing);
         List<UUID> order = new ArrayList<>(events);
         CompletableFuture<Void> brokerRejection = new CompletableFuture<>();
         // the broker rejects the second record only after all four were issued, so it is not an immediate failure

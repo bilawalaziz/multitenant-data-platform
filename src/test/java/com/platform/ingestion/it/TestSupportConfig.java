@@ -10,6 +10,11 @@ import com.platform.ingestion.messaging.EventPublisher;
 import com.platform.ingestion.messaging.KafkaEventPublisher;
 import com.platform.ingestion.messaging.OutboxMessage;
 import com.platform.ingestion.messaging.PublishException;
+import io.opentelemetry.context.Context;
+import io.opentelemetry.sdk.trace.ReadWriteSpan;
+import io.opentelemetry.sdk.trace.ReadableSpan;
+import io.opentelemetry.sdk.trace.SpanProcessor;
+import io.opentelemetry.sdk.trace.data.SpanData;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -157,6 +162,39 @@ public class TestSupportConfig {
             clients.remove(clientId);
             deleted.add(clientId);
         }
+    }
+
+    /** Keeps every ended span; Spring Boot adds all SpanProcessor beans to the tracer provider. */
+    public static class CapturedSpans implements SpanProcessor {
+
+        private final List<SpanData> ended = new CopyOnWriteArrayList<>();
+
+        public List<SpanData> ended() {
+            return ended;
+        }
+
+        @Override
+        public void onStart(Context parentContext, ReadWriteSpan span) {}
+
+        @Override
+        public boolean isStartRequired() {
+            return false;
+        }
+
+        @Override
+        public void onEnd(ReadableSpan span) {
+            ended.add(span.toSpanData());
+        }
+
+        @Override
+        public boolean isEndRequired() {
+            return true;
+        }
+    }
+
+    @Bean
+    CapturedSpans capturedSpans() {
+        return new CapturedSpans();
     }
 
     @Bean

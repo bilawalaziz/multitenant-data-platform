@@ -1,6 +1,8 @@
 package com.platform.ingestion.messaging;
 
 import com.platform.ingestion.observability.MdcKeys;
+import com.platform.ingestion.observability.OutboxTracing;
+import com.platform.ingestion.observability.OutboxTracing.PublishSpan;
 import com.platform.ingestion.observability.PlatformMetrics;
 import com.platform.ingestion.persistence.OutboxEvent;
 import com.platform.ingestion.persistence.OutboxRepository;
@@ -49,14 +51,15 @@ public class OutboxPublisher {
             String payload,
             String tenantCode,
             String schemaVersion,
-            int attempts) {
+            int attempts,
+            String traceParent) {
 
-        OutboxMessage toMessage() {
-            return new OutboxMessage(topic, key, payload, eventId.toString(), tenantCode, schemaVersion);
+        OutboxMessage toMessage(Map<String, String> traceHeaders) {
+            return new OutboxMessage(topic, key, payload, eventId.toString(), tenantCode, schemaVersion, traceHeaders);
         }
     }
 
-    private record InFlight(Claim claim, CompletableFuture<Void> future) {}
+    private record InFlight(Claim claim, CompletableFuture<Void> future, PublishSpan span) {}
 
     private record Failure(Claim claim, String message, Instant next) {}
 
@@ -68,6 +71,7 @@ public class OutboxPublisher {
     private final Clock clock;
     private final OutboxProperties props;
     private final Duration sendTimeout;
+    private final OutboxTracing tracing;
 
     public OutboxPublisher(
             OutboxRepository outbox,
@@ -78,7 +82,9 @@ public class OutboxPublisher {
             Clock clock,
             OutboxProperties props,
             PlatformKafkaProperties kafkaProps,
-            KafkaProperties springKafka) {
+            KafkaProperties springKafka,
+            OutboxTracing tracing) {
+        this.tracing = tracing;
         this.outbox = outbox;
         this.publisher = publisher;
         this.backoff = backoff;
@@ -141,13 +147,18 @@ public class OutboxPublisher {
                         .add(claim);
                 continue;
             }
-            CompletableFuture<Void> future = issue(claim);
+            PublishSpan span = tracing.startPublish(
+                    claim.traceParent(), claim.topic(), claim.eventId().toString());
+            CompletableFuture<Void> future = issue(claim, span);
+            // Ends the span when the send settles (at once for an immediate failure), not when this thread gets
+            // around to awaiting it, so its duration is the send's own.
+            future.whenComplete((ok, error) -> span.end(error));
             if (future.isCompletedExceptionally()) {
                 Failure failure = failure(claim, describe(future));
                 failures.add(failure);
                 failedTopics.put(claim.topic(), failure.next());
             } else {
-                inFlight.add(new InFlight(claim, future));
+                inFlight.add(new InFlight(claim, future, span));
             }
         }
 
@@ -176,14 +187,15 @@ public class OutboxPublisher {
         return publishedIds.size();
     }
 
-    private CompletableFuture<Void> issue(Claim claim) {
+    private CompletableFuture<Void> issue(Claim claim, PublishSpan span) {
         MDC.put(MdcKeys.EVENT_ID, claim.eventId().toString());
-        try {
-            CompletableFuture<Void> future = publisher.publish(claim.toMessage());
+        // The span is current only while this send is issued, so concurrent sends never share a context.
+        try (AutoCloseable ignored = span.makeCurrent()) {
+            CompletableFuture<Void> future = publisher.publish(claim.toMessage(span.headers()));
             return future == null
                     ? CompletableFuture.failedFuture(new PublishException("publisher returned no result", null))
                     : future;
-        } catch (RuntimeException e) {
+        } catch (Exception e) {
             return CompletableFuture.failedFuture(e);
         } finally {
             MDC.remove(MdcKeys.EVENT_ID);
@@ -210,6 +222,7 @@ public class OutboxPublisher {
                 failures.add(failure(sent.claim(), cause.getMessage()));
             } catch (TimeoutException e) {
                 failures.add(failure(sent.claim(), "Kafka publish timed out after " + sendTimeout.toMillis() + " ms"));
+                sent.span().end(e);
             } catch (InterruptedException e) {
                 // stop waiting; rows still in flight are released without charging an attempt
                 Thread.currentThread().interrupt();
@@ -222,6 +235,7 @@ public class OutboxPublisher {
     private void settleWithoutWaiting(
             InFlight sent, List<UUID> published, List<Failure> failures, List<Claim> unfinished) {
         if (!sent.future().isDone()) {
+            sent.span().end(new IllegalStateException("send abandoned before acknowledgement"));
             unfinished.add(sent.claim());
         } else if (sent.future().isCompletedExceptionally()) {
             failures.add(failure(sent.claim(), describe(sent.future())));
@@ -285,6 +299,7 @@ public class OutboxPublisher {
                 event.getPayload().toString(),
                 event.getPayload().path("tenant_id").asText(null),
                 event.getPayload().path("schema_version").asText(null),
-                event.getAttempts());
+                event.getAttempts(),
+                event.getTraceParent());
     }
 }

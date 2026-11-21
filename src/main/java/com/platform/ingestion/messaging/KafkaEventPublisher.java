@@ -24,6 +24,9 @@ public class KafkaEventPublisher implements EventPublisher {
                 .add("event_id", bytes(message.eventId()))
                 .add("tenant_id", bytes(message.tenantId()))
                 .add("schema_version", bytes(message.schemaVersion()));
+        // Replace rather than add: a second traceparent header would make consumers pick one arbitrarily.
+        message.traceHeaders()
+                .forEach((name, value) -> record.headers().remove(name).add(name, bytes(value)));
         try {
             // send() can block up to max.block.ms waiting for metadata when the broker is unreachable
             return template.send(record).thenAccept(result -> {}).exceptionallyCompose(e -> {
