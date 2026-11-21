@@ -4,10 +4,11 @@
 locals {
   az_index  = { for i, az in var.azs : az => i }
   nat_count = var.create_nat ? (var.single_nat_gateway ? 1 : length(var.azs)) : 0
-  alb_to_nodes_ports = toset([
-    tostring(var.app_port),
-    tostring(var.keycloak_port),
-  ])
+  # Traffic ports plus the health-check ports the ALB target groups probe (app and Keycloak management).
+  alb_to_nodes_ports = toset(concat(
+    [tostring(var.app_port), tostring(var.keycloak_port)],
+    [for p in var.health_check_ports : tostring(p)],
+  ))
 }
 
 resource "aws_vpc" "this" {

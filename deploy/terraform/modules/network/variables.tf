@@ -47,3 +47,9 @@ variable "keycloak_port" {
   type        = number
   default     = 8080
 }
+
+variable "health_check_ports" {
+  description = "Ports the ALB health checks probe on the pods: app management (8081) and Keycloak management (9000)"
+  type        = list(number)
+  default     = [8081, 9000]
+}

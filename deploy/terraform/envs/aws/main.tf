@@ -31,8 +31,10 @@ module "platform" {
 # domain owner: create the records from the output, then reference the issued ARN
 # in the Ingress annotation.
 resource "aws_acm_certificate" "alb" {
-  domain_name       = var.domain_name
-  validation_method = "DNS"
+  domain_name = var.domain_name
+  # The ingresses use sensor.<domain> and keycloak.<domain>.
+  subject_alternative_names = ["*.${var.domain_name}"]
+  validation_method         = "DNS"
 
   lifecycle {
     create_before_destroy = true

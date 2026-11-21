@@ -11,7 +11,7 @@ resource "aws_elasticache_parameter_group" "this" {
   # Dedup and rate-limit keys all carry a TTL; evict only those under memory pressure.
   parameter {
     name  = "maxmemory-policy"
-    value = "volatile-lru"
+    value = "volatile-ttl" # same as compose: only keys with a TTL (all of ours) are evicted, soonest first
   }
 }
 
