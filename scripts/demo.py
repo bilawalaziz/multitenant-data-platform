@@ -1025,41 +1025,72 @@ def wait_for_consumers(n, seconds=90):
     return False
 
 
-def consumer_tally(since, ids):
-    """event_id -> [replica, ...] for 'event processed' and for 'duplicate event skipped' log lines."""
+def consumer_records(since):
+    """Parsed JSON log records of every consumer replica since the timestamp, as (replica, record) pairs."""
     rc, out = compose("logs", "--since", since, "consumer")
-    processed, skipped = {}, {}
+    recs = []
     for ln in out.splitlines():
         prefix, sep, rest = ln.partition("|")
         brace = rest.find("{")
         if not sep or brace < 0:
             continue
         try:
-            rec = json.loads(rest[brace:])
+            recs.append((prefix.strip(), json.loads(rest[brace:])))
         except ValueError:
             continue
+    return recs
+
+
+def consumer_tally(since, ids):
+    """event_id -> [replica, ...] for 'event processed' and for 'duplicate event skipped' log lines."""
+    processed, skipped = {}, {}
+    for replica, rec in consumer_records(since):
         target = {"event processed": processed, "duplicate event skipped": skipped}.get(rec.get("msg"))
         if target is not None and rec.get("event_id") in ids:
-            target.setdefault(rec["event_id"], []).append(prefix.strip())
+            target.setdefault(rec["event_id"], []).append(replica)
     return processed, skipped
 
 
+def replicas_with_assignment(since):
+    """Replicas whose latest 'partitions assigned' / 'partitions revoked' line leaves a non-empty assignment."""
+    latest = {}
+    for replica, rec in consumer_records(since):
+        if rec.get("msg") in ("partitions assigned", "partitions revoked"):
+            latest[replica] = rec.get("msg") == "partitions assigned" and bool(rec.get("partitions"))
+    return {r for r, owns in latest.items() if owns}
+
+
 def s20_shared_dedup():
-    title(20, "Shared deduplication: two consumer replicas process each event exactly once")
+    title(20, "Shared deduplication: two consumer replicas split the work and process each event exactly once")
     # Generous margin: the host and the Docker VM clocks need not agree to the second.
     since = datetime.fromtimestamp(time.time() - 60, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
+        # More devices per tenant spread the message keys over the topic's partitions, so both replicas get work.
+        extra = ["MACHINE-%03d" % n for n in range(11, 14)]
+        for key in TENANTS:
+            for device in extra:
+                st, cred = register_device(key, device, "Demo device for the shared-consumer scenario")
+                expect("%s device %s registered" % (key, device), bool(cred), st)
         # --no-deps and --no-recreate leave the rest of the stack, and the running replica, untouched.
         rc, out = compose("up", "-d", "--scale", "consumer=2", "--no-deps", "--no-recreate", "consumer")
         expect("docker compose up --scale consumer=2", rc == 0, out.strip()[-200:])
         expect("two consumer replicas running", wait_for_consumers(2), len(running_consumers()))
+        deadline = time.time() + 90
+        owners = replicas_with_assignment(since)
+        while time.time() < deadline and len(owners) < 2:
+            time.sleep(3)
+            owners = replicas_with_assignment(since)
+        if not expect("both replicas logged 'partitions assigned' with partitions", len(owners) == 2, sorted(owners)):
+            return
+        senders = [(kind, device) for device in range(4) for kind in TENANTS]
+        senders = [(kind, ([DEVICES[kind]] + extra)[n]) for kind, n in senders]
         ids = []
-        for i in range(12):
-            kind = "alpha" if i % 2 == 0 else "beta"
-            st, resp, _, _ = ingest(DEVICE_IDENT[kind], fresh_reading(kind, 80.0 + i))
+        for i in range(24):
+            kind, device = senders[i % len(senders)]
+            st, resp, _, _ = ingest("device:%s:%s" % (kind, device), reading_for(kind, device, 80.0 + i))
             if st == 202:
                 ids.append(resp.get("eventId"))
-        expect("12 readings with distinct event ids accepted", len(set(ids)) == 12, len(ids))
+        expect("24 readings with distinct event ids accepted", len(set(ids)) == 24, len(ids))
         deadline = time.time() + 90
         processed, skipped = consumer_tally(since, ids)
         while time.time() < deadline and len(processed) < len(ids):
@@ -1070,8 +1101,10 @@ def s20_shared_dedup():
         processed, skipped = consumer_tally(since, ids)
         expect("every event was processed", len(processed) == len(ids), "%d of %d" % (len(processed), len(ids)))
         twice = {e: r for e, r in processed.items() if len(r) != 1}
-        expect("no event processed more than once across replicas", not twice, twice)
-        info("replicas that processed events: %s" % sorted({r[0] for r in processed.values()}))
+        expect("exactly one 'event processed' per event id across replicas", not twice, twice)
+        working = {r for reps in processed.values() for r in reps}
+        info("events processed per replica: %s" % {r: sum(r in v for v in processed.values()) for r in sorted(working)})
+        expect("each of the 2 replicas processed at least one event", len(working) == 2, sorted(working))
         info("redeliveries skipped as duplicates: %d" % sum(len(v) for v in skipped.values()))
     finally:
         rc, out = compose("up", "-d", "--scale", "consumer=1", "--no-deps", "--no-recreate", "consumer")
@@ -1110,6 +1143,62 @@ def s21_row_level_security():
     expect("scoped to tenant-alpha no other tenant's device is visible", rc == 0 and last == "0", (rc, last))
 
 
+def s22_new_tenant_topic():
+    title(22, "A tenant created while the consumer runs is consumed without a restart")
+    code = "rt-" + RUN_ID  # tenant codes are lowercase, and a new one per run keeps the demo re-runnable
+    device = "MACHINE-001"
+    since = datetime.fromtimestamp(time.time() - 60, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    adm = token("platform-admin")
+    st, body, _ = http(
+        "POST", APP + "/api/v1/admin/tenants", bearer(adm), {"tenantId": code, "displayName": "Runtime tenant " + code}
+    )
+    if not expect("register new tenant %s -> 201" % code, st == 201, (st, body)):
+        return
+    TENANTS["rt"] = code  # the helpers resolve a tenant through TENANTS; removed again below
+    try:
+        st, cred = register_device("rt", device, "Device of the runtime tenant")
+        if not expect("device %s registered for %s" % (device, code), bool(cred), st):
+            return
+        # The alpha contract fits the demo device and payload; the platform admin may manage any tenant.
+        body, ctype = encode_multipart(
+            {"name": "rt-readings"},
+            {
+                "spec": ("openapi.yaml", read_demo("tenant-alpha", "openapi.yaml"), "application/yaml"),
+                "mapping": ("mapping.json", read_demo("tenant-alpha", "mapping.json"), "application/json"),
+            },
+        )
+        st, resp, _ = http(
+            "POST", APP + "/api/v1/tenants/%s/contracts" % code, bearer(adm, {"Content-Type": ctype}), body
+        )
+        if not expect("upload contract for %s -> 201" % code, st == 201, (st, resp)):
+            return
+        st, resp, _ = http(
+            "POST",
+            APP
+            + "/api/v1/tenants/%s/contracts/%s/versions/%s/activate"
+            % (code, pick(resp, "contractId", "id"), pick(resp, "version", "contractVersion")),
+            bearer(adm),
+        )
+        if not expect("activate the contract -> 200 or 204", st in (200, 204), (st, resp)):
+            return
+        st, resp, _, _ = ingest("device:rt:%s" % device, reading_for("alpha", device, 71.5))
+        if not expect("ingest one reading -> 202", st == 202 and isinstance(resp, dict), (st, resp)):
+            return
+        event_id = resp.get("eventId")
+        deadline = time.time() + 40
+        processed = {}
+        while time.time() < deadline and event_id not in processed:
+            time.sleep(3)
+            processed, _ = consumer_tally(since, [event_id])
+        expect(
+            "the running consumer logged 'event processed' for the new tenant's event (no restart)",
+            event_id in processed,
+            "waited 40 s for %s" % event_id,
+        )
+    finally:
+        TENANTS.pop("rt", None)
+
+
 SCENARIOS = [
     ("health", s01_health),
     ("tokens", s02_tokens),
@@ -1132,6 +1221,7 @@ SCENARIOS = [
     ("tracing", s19_tracing),
     ("shared-dedup", s20_shared_dedup),
     ("rls", s21_row_level_security),
+    ("new-tenant-topic", s22_new_tenant_topic),
 ]
 
 

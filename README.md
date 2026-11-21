@@ -127,7 +127,9 @@ Environment variables read by `src/main/resources/application.yml`:
 
 Compose reads more variables from `.env.example` (`POSTGRES_*`, `DB_APP_*`, `REDIS_PASSWORD`, `KEYCLOAK_*`,
 `*_INGEST_CLIENT_SECRET`, `TEMPO_HOST_PORT`, `CONSUMER_*`). The consumer reads `REDIS_HOST`, `REDIS_PORT`,
-`REDIS_PASSWORD` and `DEDUP_TTL_SECONDS` (compose: `CONSUMER_DEDUP_TTL_SECONDS`, default `604800`).
+`REDIS_PASSWORD` and `DEDUP_TTL_SECONDS` (compose: `CONSUMER_DEDUP_TTL_SECONDS`, default `604800`). It subscribes
+to the regex `TOPIC_PATTERN` (default `^.*\.readings$`), so a tenant created later is consumed within about 20 s; an
+explicit comma-separated `TOPICS` overrides the pattern. Compose no longer passes `TOPICS`.
 
 Key `platform.*` properties:
 
