@@ -341,5 +341,48 @@ class RedisOutageTest(unittest.TestCase):
         self.assertEqual(self.kafka.commits, [0, 1, 2])
 
 
+class SubscriptionTest(unittest.TestCase):
+    def test_defaults_to_the_readings_pattern(self):
+        self.assertEqual(c.subscription_topics({}), [r"^.*\.readings$"])
+
+    def test_pattern_from_environment(self):
+        self.assertEqual(c.subscription_topics({"TOPIC_PATTERN": r"^acme-.*\.readings$"}), [r"^acme-.*\.readings$"])
+
+    def test_explicit_topics_win_over_the_pattern(self):
+        env = {"TOPICS": " a.readings, b.readings ,", "TOPIC_PATTERN": "^x$"}
+        self.assertEqual(c.subscription_topics(env), ["a.readings", "b.readings"])
+
+    def test_blank_topics_fall_back_to_the_pattern(self):
+        self.assertEqual(c.subscription_topics({"TOPICS": " , "}), [c.DEFAULT_TOPIC_PATTERN])
+
+    def test_main_subscribes_with_the_pattern_and_rebalance_callbacks(self):
+        fake = mock.MagicMock()
+        fake.poll.side_effect = KeyboardInterrupt
+        kafka = mock.MagicMock(Consumer=mock.MagicMock(return_value=fake), KafkaException=Exception)
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.dict("sys.modules", {"confluent_kafka": kafka}):
+            with mock.patch.object(c.DedupStore, "from_env", return_value=mock.MagicMock()):
+                with redirect_stdout(io.StringIO()):
+                    with self.assertRaises(KeyboardInterrupt):
+                        c.main()
+        fake.subscribe.assert_called_once_with([c.DEFAULT_TOPIC_PATTERN], on_assign=c.on_assign, on_revoke=c.on_revoke)
+
+    def test_assignment_callbacks_log_the_partitions(self):
+        parts = [
+            mock.Mock(topic="tenant-alpha.readings", partition=0),
+            mock.Mock(topic="tenant-beta.readings", partition=2),
+        ]
+        for callback, msg in ((c.on_assign, "partitions assigned"), (c.on_revoke, "partitions revoked")):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                callback(None, parts)
+            rec = json.loads(buf.getvalue())
+            self.assertEqual(rec["msg"], msg)
+            self.assertEqual(rec["count"], 2)
+            self.assertEqual(
+                rec["partitions"],
+                [{"topic": "tenant-alpha.readings", "partition": 0}, {"topic": "tenant-beta.readings", "partition": 2}],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
