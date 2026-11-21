@@ -21,6 +21,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -128,17 +129,32 @@ class RateLimitIT extends AbstractIntegrationTest {
         return counter == null ? 0 : counter.count();
     }
 
-    /** Lets the circuit breaker close again so the tests that follow are limited as usual. */
-    private void awaitLimiterRecovered() throws InterruptedException {
-        for (int attempt = 0; attempt < 10; attempt++) {
-            Thread.sleep(1200);
-            double errors = limiterErrors();
-            rateLimiter.checkTenant("tenant-recovery-" + UUID.randomUUID());
-            if (limiterErrors() == errors) {
+    /**
+     * Returns once a check on the limiter ran against Redis: connected, breaker closed, nothing skipped. Every
+     * test starts here so a cold connect or a previous test's outage cannot let requests through unchecked.
+     */
+    private static void awaitReady(RateLimiter limiter, MeterRegistry meters) throws InterruptedException {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(20);
+        while (System.nanoTime() < deadline) {
+            double before = counterValue(meters, "ratelimit.errors") + counterValue(meters, "ratelimit.skipped");
+            limiter.checkTenant("ready-" + UUID.randomUUID());
+            double after = counterValue(meters, "ratelimit.errors") + counterValue(meters, "ratelimit.skipped");
+            if (after == before) {
                 return;
             }
+            Thread.sleep(100);
         }
-        throw new AssertionError("rate limiter did not recover after Redis was resumed");
+        throw new AssertionError("rate limiter never became ready");
+    }
+
+    private static double counterValue(MeterRegistry meters, String name) {
+        var counter = meters.find(name).counter();
+        return counter == null ? 0 : counter.count();
+    }
+
+    @BeforeEach
+    void limiterIsReady() throws Exception {
+        awaitReady(rateLimiter, registry);
     }
 
     private double counter(String name) {
@@ -218,13 +234,15 @@ class RateLimitIT extends AbstractIntegrationTest {
     void twoLimitersOnOneRedisTogetherAdmitNoMoreThanTheCapacity() throws Exception {
         String tenant = "tenant-shared-" + UUID.randomUUID().toString().substring(0, 8);
         // Separate clients and proxy managers, as two application instances would have.
-        RedisProxyManagerSource firstSource = new RedisProxyManagerSource(redisProperties);
-        RedisProxyManagerSource secondSource = new RedisProxyManagerSource(redisProperties);
+        RedisProxyManagerSource firstSource = new RedisProxyManagerSource(redisProperties, limits);
+        RedisProxyManagerSource secondSource = new RedisProxyManagerSource(redisProperties, limits);
         RateLimiter first = new RateLimiter(limits, firstSource, platformMetrics);
         RateLimiter second = new RateLimiter(limits, secondSource, platformMetrics);
-        // Connect first: callers that find a connect in progress are admitted unchecked rather than queued.
-        first.checkTenant("warmup-" + tenant);
-        second.checkTenant("warmup-" + tenant);
+        // These limiters connect in the background; admitted-unchecked calls before that would skew the count.
+        first.connectAtStartup();
+        second.connectAtStartup();
+        awaitReady(first, registry);
+        awaitReady(second, registry);
 
         AtomicInteger admitted = new AtomicInteger();
         List<Callable<Void>> attempts = new ArrayList<>();
@@ -276,7 +294,7 @@ class RateLimitIT extends AbstractIntegrationTest {
         } finally {
             REDIS.getDockerClient().unpauseContainerCmd(REDIS.getContainerId()).exec();
         }
-        awaitLimiterRecovered();
+        awaitReady(rateLimiter, registry);
 
         assertThat(limiterErrors()).isGreaterThan(errorsBefore);
         assertThat(counter("ratelimit.skipped")).isGreaterThan(skippedBefore);
