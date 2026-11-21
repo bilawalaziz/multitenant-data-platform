@@ -4,6 +4,7 @@ import com.platform.ingestion.ingestion.IngestionDtos.IngestionDetail;
 import com.platform.ingestion.ingestion.IngestionDtos.IngestionSummary;
 import java.util.List;
 import java.util.UUID;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -21,12 +22,13 @@ public class IngestionQueryController {
     }
 
     @GetMapping
-    public List<IngestionSummary> list(@PathVariable String tenantId, @RequestParam(required = false) Integer limit) {
-        return service.list(tenantId, limit);
+    public List<IngestionSummary> list(
+            @PathVariable String tenantId, @RequestParam(required = false) Integer limit, Authentication auth) {
+        return service.list(tenantId, limit, auth);
     }
 
     @GetMapping("/{ingestionId}")
-    public IngestionDetail detail(@PathVariable String tenantId, @PathVariable UUID ingestionId) {
-        return service.detail(tenantId, ingestionId);
+    public IngestionDetail detail(@PathVariable String tenantId, @PathVariable UUID ingestionId, Authentication auth) {
+        return service.detail(tenantId, ingestionId, auth);
     }
 }
