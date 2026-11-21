@@ -8,9 +8,10 @@
   Tracing samples 10% (`TRACING_SAMPLING_PROBABILITY=0.1`) unless overridden.
 - Database roles: the DBA creates the application role (`DB_USER`) before the first start:
   `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, not an owner. `DB_MIGRATION_USER` should be
-  a non-superuser role that owns the schema objects. `V3` fails if the application role does not exist, grants it the
-  table privileges and `CREATE` on the database (tenant schemas `ts_*` are created at runtime). Flyway placeholder
-  `app_role` is set from `DB_USER`.
+  a non-superuser role that owns the schema objects. `V3` fails if the application role does not exist and grants it the
+  table privileges (it also granted `CREATE` on the database). `V6` revokes that `CREATE`: the application role has no
+  `CREATE` on the database and creates no `ts_*` schemas at runtime. Flyway placeholder `app_role` is set from `DB_USER`.
+  On AWS and in k3d the `db-bootstrap` hook creates the roles (see DEPLOYMENT.md).
 - Redis: required by the app (rate limiting) and the consumer (dedup). Use a password and keep it off public
   networks. Redis health is not part of `/actuator/health` by design. Compose runs `redis:7.4.12-alpine` with AOF,
   `requirepass`, `maxmemory 96mb`, `maxmemory-policy volatile-ttl`, `mem_limit` 128m and no host port.
@@ -49,8 +50,9 @@
   token is useless against the platform API, but treat `PROVISIONER_CLIENT_SECRET` as realm-admin-equivalent: keep it
   in a secret store, rotate it, and restrict network access to the Keycloak admin API to the app.
 - Device token lifetime: after a credential rotation or disable, access tokens already issued stay valid until they
-  expire (`accessTokenLifespan` 900 s in the demo realm). Deactivating the device in the platform takes effect at
-  once.
+  expire. Device clients get 300 s (`platform.keycloak.provisioner.device-token-lifespan`; clients created earlier get it
+  on their next credential rotation); tenant-wide clients keep the realm default (`accessTokenLifespan` 900 s in the demo
+  realm). Deactivating the device in the platform takes effect at once.
 - Secrets: `DB_PASSWORD`, `DB_APP_PASSWORD`, `REDIS_PASSWORD`, client secrets, `PROVISIONER_CLIENT_SECRET`, `KEYCLOAK_ADMIN_PASSWORD`, `GRAFANA_ADMIN_PASSWORD` and
   `DEMO_USER_PASSWORD` come from a secret store, not from a committed `.env`. Compose refuses to start when a
   required variable is unset (`:?` syntax in `docker-compose.yml`).
@@ -61,7 +63,8 @@
 
 - Flyway runs on startup against schema `platform` (`spring.flyway.*` in `application.yml`) as `DB_MIGRATION_USER`.
   `V1` creates the base schema, `V2` adds retention indexes, `V3` enables row-level security and grants, `V4` adds
-  `devices.credential_client_id`, `V5` adds `outbox_events.trace_parent`.
+  `devices.credential_client_id`, `V5` adds `outbox_events.trace_parent`, `V6` adds `platform.tenant_settings` and
+  revokes `CREATE` on the database from the application role.
 - Application connections have `statement_timeout` 15 s and `lock_timeout` 5 s (`DB_STATEMENT_TIMEOUT_MS`,
   `DB_LOCK_TIMEOUT_MS`). Flyway connections do not get these. `V2` sets `SET LOCAL statement_timeout = 0` itself.
 - `V2` builds its indexes without `CONCURRENTLY`. On a database with large tables, that build blocks writes for its
@@ -69,6 +72,23 @@
 - For a future index on a large live table, use `CREATE INDEX CONCURRENTLY` in a migration that Flyway runs outside
   a transaction (`executeInTransaction=false`, as the `V2` comment describes).
 - Migrations are forward-only. Never edit an applied migration; Flyway rejects changed checksums at startup.
+
+### Tenant settings migration (V6)
+
+`V6__tenant_settings_rls.sql` moves tenant settings from the per-tenant tables `ts_<code>.tenant_settings` into
+`platform.tenant_settings`, which has row-level security like the other tenant tables. It copies every row
+(`ON CONFLICT DO NOTHING`), then revokes `CREATE` on the database from the application role (`DB_USER`). It fails if the
+role still holds `CREATE` through a grant made by another role; revoke it as that role or as the database owner, then
+migrate again.
+
+- The old `ts_<code>` schemas are not dropped. After checking that `platform.tenant_settings` holds every setting, an
+  operator may run `DROP SCHEMA ts_<code> CASCADE` for each old schema.
+- Those schemas and tables are owned by the application role. If `DB_MIGRATION_USER` is not a superuser it cannot read
+  them, and V6 stops with an error that contains the statements to run. Connected as the application role, run the
+  `GRANT USAGE ON SCHEMA ts_<code> TO <migration user>; GRANT SELECT ON ts_<code>.tenant_settings TO <migration user>;`
+  pair it prints for each tenant, then start the application (or run the migration) again. V6 runs in one Flyway
+  transaction, so the failure leaves nothing changed.
+- `platform.tenants.schema_name` still holds `ts_<code>`; the application no longer creates or uses that schema.
 
 ## Alerts
 
@@ -170,7 +190,11 @@ Rules are in `infra/prometheus/alerts.yml`.
 - Roll back by redeploying the previous image tag. Compose builds `sensor-ingestion-platform:local`. Use a
   versioned tag in production so the previous image stays available.
 - Flyway migrations are forward-only. There is no down migration. `V2`, `V4` and `V5` only add indexes or nullable
-  columns, so rolling back the application needs no schema change. `V3` enables row-level security: an image from
+  columns, so rolling back the application needs no schema change. `V6` creates `platform.tenant_settings` and revokes
+  `CREATE` on the database from the application role; it leaves the old `ts_*` schemas in place. An image from before
+  `V6` reads settings from those schemas and creates them at runtime, so rolling back below `V6` needs the `ts_*`
+  schemas to still exist (do not drop them yet) and `CREATE` on the database granted to the application role again.
+  Settings changed after `V6` exist only in `platform.tenant_settings`. `V3` enables row-level security: an image from
   before `V3` sets no tenant scope, so it must connect as the owner role (tables do not use `FORCE ROW LEVEL
   SECURITY`, so the owner is not filtered). Test the rollback in staging first.
 
@@ -190,3 +214,41 @@ For a compose stack created before row-level security, device credentials, rate 
 5. Issue credentials for existing devices: `POST /api/v1/tenants/{tenantId}/devices/{deviceId}/credentials`.
 6. Optional: `docker volume rm sensor-platform_consumer-data`. The old sqlite dedup file is no longer used; dedup state
    starts empty in Redis.
+
+## Kubernetes runbook
+
+Deployment is described in [DEPLOYMENT.md](DEPLOYMENT.md). Workloads are in namespace `sensor-platform`
+(`sensor-platform-app`, `sensor-platform-consumer`, `keycloak`) and `observability`. For the local k3d cluster, kubectl
+runs in the helper container that `scripts/aws-local.sh` starts; on AWS use `kubectl` directly.
+
+```bash
+kc() { docker exec -i sensor-local-kubectl kubectl "$@"; }   # local only
+```
+
+- **ExternalSecret sync.** `kc get externalsecret -A` shows `STATUS` `SecretSynced` and `READY` `True` when the
+  Kubernetes Secret exists. For a failing one, `kc -n sensor-platform describe externalsecret <name>` shows the store
+  error. The store is `kc get clustersecretstore aws-secrets` (`Valid`). Pods that reference a Secret that has not synced
+  stay in `CreateContainerConfigError` and start once it exists. Secret changes do not restart pods:
+  `kc -n sensor-platform rollout restart deploy/sensor-platform-app deploy/sensor-platform-consumer`.
+- **Re-run db-bootstrap** (creates missing roles, resets role passwords from the secrets, then removes its credentials).
+  It is a hook of the `sensor-platform` release, so it runs on every Helm upgrade. `helmfile apply` upgrades only
+  releases that changed; to force it on AWS run
+  `cd deploy && helmfile -e aws -l name=sensor-platform sync`. Locally `bash scripts/aws-local.sh deploy` upgrades the
+  release with a new image tag. A successful Job is deleted. A failed one stays: read it with
+  `kc -n sensor-platform logs job/sensor-platform-db-bootstrap`. The Job stops after 900 s (`activeDeadlineSeconds`).
+- **Scale consumers.** `kc -n sensor-platform scale deploy/sensor-platform-consumer --replicas=3`. Useful replicas are at
+  most the partitions of all `*.readings` topics (3 per tenant). A Helm upgrade resets the count to `consumer.replicas`.
+- **Logs.**
+  `kc -n sensor-platform logs -l app.kubernetes.io/name=sensor-platform,app.kubernetes.io/component=app --tail=100 --prefix`
+  and the same with `component=consumer`. Add `--previous` for a restarted container. Keycloak: `-l app.kubernetes.io/name=keycloak`.
+- **Prometheus, Tempo and the management port** have no ingress. Read them through the API server's service proxy, which
+  also bypasses the NetworkPolicies:
+
+  ```bash
+  kc get --raw /api/v1/namespaces/observability/services/prometheus-server:80/proxy/api/v1/targets
+  kc get --raw "/api/v1/namespaces/observability/services/prometheus-server:80/proxy/api/v1/alerts"
+  kc get --raw /api/v1/namespaces/observability/services/tempo:3200/proxy/api/traces/<traceId>
+  kc get --raw /api/v1/namespaces/sensor-platform/services/sensor-platform-app:8081/proxy/actuator/health
+  ```
+
+  Grafana is at `http://grafana.localtest.me` locally.
