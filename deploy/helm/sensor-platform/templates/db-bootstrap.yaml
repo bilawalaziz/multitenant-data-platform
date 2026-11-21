@@ -1,0 +1,214 @@
+{{- if .Values.dbBootstrap.enabled }}
+{{- $name := printf "%s-db-bootstrap" (include "sp.fullname" .) }}
+{{- $secret := include "sp.secretName" (dict "root" . "component" "db-bootstrap") }}
+{{- $master := .Values.dbBootstrap.master }}
+{{- if and (not $master.existingSecret) (not $master.secretId) (not (and (not .Values.externalSecrets.enabled) (hasKey .Values.plainSecrets "MASTER_USER"))) }}
+{{- fail "dbBootstrap needs dbBootstrap.master.existingSecret, dbBootstrap.master.secretId, or plainSecrets.MASTER_USER/MASTER_PASSWORD" }}
+{{- end }}
+# Pre-install / pre-upgrade hooks, in this order: the ServiceAccount, ConfigMap and Secret (weight -10), then the job
+# (weight 0). See README.md, "Hook ordering".
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "sp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-bootstrap
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "sp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-bootstrap
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  bootstrap.sql: |
+{{ .Files.Get "files/db-bootstrap.sql" | indent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "sp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-bootstrap
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.dbBootstrap.backoffLimit }}
+  # Also bounds the wait for the ExternalSecret to be synced: a pod whose Secret does not exist yet stays pending.
+  activeDeadlineSeconds: {{ .Values.dbBootstrap.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "sp.labels" . | nindent 8 }}
+        app.kubernetes.io/component: db-bootstrap
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        # postgres user of the postgres:17-alpine image
+        runAsUser: 70
+        runAsGroup: 70
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: bootstrap
+          image: {{ .Values.dbBootstrap.image.repository }}:{{ .Values.dbBootstrap.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "sp.containerSecurity" . | nindent 12 }}
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              i=0
+              until pg_isready -q -h "$PGHOST" -p "$PGPORT"; do
+                i=$((i + 1))
+                if [ "$i" -ge 60 ]; then echo "database $PGHOST:$PGPORT is not reachable" >&2; exit 1; fi
+                sleep 5
+              done
+              exec psql -X -v ON_ERROR_STOP=1 -d postgres -f /scripts/bootstrap.sql
+          env:
+            - {name: PGHOST, value: {{ .Values.config.db.host | quote }}}
+            - {name: PGPORT, value: {{ .Values.config.db.port | quote }}}
+            - {name: PGCONNECT_TIMEOUT, value: "10"}
+            - {name: PSQLRC, value: /dev/null}
+            - {name: HOME, value: /tmp}
+            - {name: DB_NAME, value: {{ .Values.config.db.name | quote }}}
+            - {name: KEYCLOAK_ENABLED, value: {{ .Values.dbBootstrap.keycloak.enabled | quote }}}
+            - {name: KEYCLOAK_DB_NAME, value: {{ .Values.dbBootstrap.keycloak.database | quote }}}
+            {{- with .Values.dbBootstrap.sslmode }}
+            - {name: PGSSLMODE, value: {{ . | quote }}}
+            {{- end }}
+            {{- if $master.existingSecret }}
+            - name: PGUSER
+              valueFrom: {secretKeyRef: {name: {{ $master.existingSecret }}, key: {{ $master.usernameKey }}}}
+            - name: PGPASSWORD
+              valueFrom: {secretKeyRef: {name: {{ $master.existingSecret }}, key: {{ $master.passwordKey }}}}
+            {{- else }}
+            - name: PGUSER
+              valueFrom: {secretKeyRef: {name: {{ $secret }}, key: MASTER_USER}}
+            - name: PGPASSWORD
+              valueFrom: {secretKeyRef: {name: {{ $secret }}, key: MASTER_PASSWORD}}
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ $secret }}
+          resources:
+            {{- toYaml .Values.dbBootstrap.resources | nindent 12 }}
+          volumeMounts:
+            - {name: scripts, mountPath: /scripts, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: scripts
+          configMap: {name: {{ $name }}}
+        - name: tmp
+          emptyDir: {sizeLimit: 8Mi}
+{{- if .Values.dbBootstrap.cleanup.enabled }}
+{{- $kind := ternary "externalsecrets" "secrets" .Values.externalSecrets.enabled }}
+{{- $group := ternary "external-secrets.io" "" .Values.externalSecrets.enabled }}
+{{- $cleanup := printf "%s-cleanup" $name }}
+# Post-install / post-upgrade: drop the hook's credentials (the master login included) once the job has succeeded.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $cleanup }}
+  labels:
+    {{- include "sp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-bootstrap-cleanup
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $cleanup }}
+  labels:
+    {{- include "sp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-bootstrap-cleanup
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [{{ $group | quote }}]
+    resources: [{{ $kind | quote }}]
+    resourceNames: [{{ $secret | quote }}]
+    verbs: [delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $cleanup }}
+  labels:
+    {{- include "sp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-bootstrap-cleanup
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $cleanup }}}
+subjects:
+  - {kind: ServiceAccount, name: {{ $cleanup }}, namespace: {{ .Release.Namespace }}}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $cleanup }}
+  labels:
+    {{- include "sp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-bootstrap-cleanup
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        {{- include "sp.labels" . | nindent 8 }}
+        app.kubernetes.io/component: db-bootstrap-cleanup
+    spec:
+      serviceAccountName: {{ $cleanup }}
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: cleanup
+          image: {{ .Values.dbBootstrap.cleanup.image.repository }}:{{ .Values.dbBootstrap.cleanup.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "sp.containerSecurity" . | nindent 12 }}
+          command: ["kubectl"]
+          args: ["delete", {{ $kind | quote }}, {{ $secret | quote }}, "--ignore-not-found", "--wait=false"]
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 64Mi}
+{{- end }}
+{{- end }}

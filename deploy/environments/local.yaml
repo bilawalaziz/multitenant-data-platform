@@ -1,0 +1,12 @@
+# State values of the local (k3d) environment. See deploy/helm/README.md.
+region: us-east-1
+
+# Single registry value for the application images (D4 pushes them here). Also in
+# helm/sensor-platform/values-local.yaml; this one wins because helmfile sets it last.
+registry: k3d-sensor-registry:5000
+
+# Emulator CA written by the runner (scripts/aws-local.sh); External Secrets mounts it to verify the endpoint.
+emulatorCaFile: ../.scratch/aws-local/emu-home/9297/ca.pem
+
+# Tag of the application images; scripts/aws-local.sh passes a fresh one per build so a redeploy rolls the pods.
+imageTag: local

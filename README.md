@@ -21,7 +21,7 @@ event, stored in PostgreSQL, and published to a per-tenant Kafka topic through a
             | JDBC                                     | Kafka, acks=all
             v                                          v
       PostgreSQL 17                          <tenant>.readings topics
-   platform.* tables, ts_<tenant>.*                    |
+        platform.* tables                              |
                                                        v
  Keycloak (8180) issues tokens               consumer/consumer.py -> Redis (dedup)
  Redis: rate limit buckets, consumer dedup keys
@@ -67,6 +67,11 @@ curl -sS -X POST http://localhost:8080/api/v1/ingestion/readings \
 ```
 
 The response is `202`. Repeating the request with the same key and body returns `200` with `Idempotent-Replayed: true`.
+
+## Deployment
+
+Kubernetes deployment (Terraform for AWS, Helm and Helmfile for the workloads, a local run on k3d and the AWS
+Emulator with `bash scripts/aws-local.sh up`) is documented in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## API
 
@@ -127,7 +132,9 @@ Environment variables read by `src/main/resources/application.yml`:
 
 Compose reads more variables from `.env.example` (`POSTGRES_*`, `DB_APP_*`, `REDIS_PASSWORD`, `KEYCLOAK_*`,
 `*_INGEST_CLIENT_SECRET`, `TEMPO_HOST_PORT`, `CONSUMER_*`). The consumer reads `REDIS_HOST`, `REDIS_PORT`,
-`REDIS_PASSWORD` and `DEDUP_TTL_SECONDS` (compose: `CONSUMER_DEDUP_TTL_SECONDS`, default `604800`).
+`REDIS_PASSWORD` and `DEDUP_TTL_SECONDS` (compose: `CONSUMER_DEDUP_TTL_SECONDS`, default `604800`). It subscribes
+to the regex `TOPIC_PATTERN` (default `^.*\.readings$`), so a tenant created later is consumed within about 20 s; an
+explicit comma-separated `TOPICS` overrides the pattern. Compose no longer passes `TOPICS`.
 
 Key `platform.*` properties:
 
@@ -165,7 +172,7 @@ With `prod`, these settings have no defaults and startup fails naming any that i
 |----------------------------------|-------------------------------------------------------------|----------------|
 | `./mvnw verify`                  | Unit tests and `*IT` integration tests                      | JDK 17, Docker |
 | `bash scripts/mvn.sh verify`     | Same build inside a JDK 17 container                        | Docker         |
-| `bash scripts/ci-local.sh [job]` | `workflows`, `lint`, `consumer`, `build` or `docker` (all if omitted) | Docker |
+| `bash scripts/ci-local.sh [job]` | `workflows`, `lint`, `consumer`, `build`, `docker` or `infra` (Terraform, Helm, kubeconform, trivy config, shellcheck; all if omitted) | Docker |
 
 Consumer tests run in the `consumer` job, which installs `consumer/requirements.txt`; to run them locally use
 `pip install -r consumer/requirements.txt`. Integration tests use Testcontainers for PostgreSQL and Kafka. The `docker` job builds both images, scans the app
@@ -175,11 +182,13 @@ Pre-commit hooks (`pip install pre-commit && pre-commit install`): whitespace, Y
 
 ## Design notes
 
-- **Tenants.** Shared tables use schema `platform` and a `tenant_id` column. Each tenant also gets schema `ts_<code>`.
+- **Tenants.** Shared tables use schema `platform` and a `tenant_id` column. Tenant settings are rows of
+  `platform.tenant_settings` (`V6`). `platform.tenants.schema_name` still holds `ts_<code>` and the API returns it, but
+  no schema is created.
 - **Row-level security.** The app connects as `sensor_app` (no superuser, no `BYPASSRLS`, owns nothing). Flyway
   migrates as the owner. `V3` enables RLS on the 7 tenant-owned tables (`devices`, `contracts`, `contract_versions`,
   `contract_mappings`, `ingestion_records`, `idempotency_records`, `outbox_events`) with policy
-  `tenant_id = platform.current_tenant() OR platform.rls_system()`. The session settings `app.tenant_id` and
+  `tenant_id = platform.current_tenant() OR platform.rls_system()`; `V6` adds `tenant_settings` with the same policy. The session settings `app.tenant_id` and
   `app.rls_system` are set on every connection checkout (one extra `set_config` round trip). Without a scope no row
   is visible or writable. `platform.tenants` has no policy. Outbox publishing, retention and administration run with
   `app.rls_system`.
@@ -199,7 +208,8 @@ Pre-commit hooks (`pip install pre-commit && pre-commit install`): whitespace, Y
   clients) work while `platform.security.tenant-ingest-credentials-enabled` is true (default; `false` with `prod`);
   otherwise `403 DEVICE_CREDENTIAL_REQUIRED`. `POST .../deactivate` marks the device INACTIVE first (readings get
   `422 DEVICE_NOT_REGISTERED` at once), then disables the client; access tokens already issued stay valid until they
-  expire (900 s in the demo realm). If Keycloak is unreachable, registration fails with
+  expire. Device client tokens live 300 s (`platform.keycloak.provisioner.device-token-lifespan`); tenant-wide
+  clients keep the realm default (900 s in the demo realm). If Keycloak is unreachable, registration fails with
   `503 CREDENTIAL_PROVISIONING_UNAVAILABLE` and no device is stored.
   Client ids are `device-<tenant>-<device id lower-cased, characters outside a-z0-9. replaced by '-'>-<16 hex of
   SHA-256(tenant, device id)>`; the hash keeps ids that differ only by case or punctuation distinct, because
@@ -233,12 +243,17 @@ Pre-commit hooks (`pip install pre-commit && pre-commit install`): whitespace, Y
   behind after both the insert and the compensating delete fail (it is logged by client id); the next
   registration or credential request for that device replaces such a client.
 - RLS guards against a missing tenant filter or a wrong id, not against SQL run as `sensor_app`, which could set
-  `app.rls_system`. The `ts_*` schemas are created at runtime by the app role (it has `CREATE` on the database) and
-  are isolated by schema, not RLS. The `OR` in the policy may prevent index use on large tables.
-- Device tokens stay valid until expiry after a rotate or disable; the device registry check makes deactivation
-  immediate. A device token can list the whole tenant's ingestions. In a rare cross-instance race a caller can end up
-  with an invalid secret; `POST .../credentials` fixes it.
+  `app.rls_system`.
+- Tenant settings live in `platform.tenant_settings` under RLS (`V6`). The app role has no `CREATE` on the database and
+  creates no `ts_*` schemas. Schemas left by earlier versions stay until an operator drops them (docs/OPERATIONS.md).
+- Device tokens live 300 s (`platform.keycloak.provisioner.device-token-lifespan`); clients created earlier get this on
+  their next credential rotation. After a rotate or disable, an issued device token stays valid for at most 5 minutes;
+  the device registry check makes deactivation immediate.
+- Device tokens read only their own device's ingestions: another device's record answers `404` and an inactive device
+  `422`. With `platform.security.tenant-ingest-credentials-enabled` off, tenant-wide ingest tokens get `403` on reads.
+- In a rare cross-instance race a caller can end up with an invalid secret; `POST .../credentials` fixes it.
 - Rate limiting fails open: while `RateLimiterDegraded` fires, limits are not enforced.
 - Dedup keys are not durable if Redis loses them (at-least-once delivery).
-- Compose runs one Kafka broker with replication factor 1 and Keycloak in `start-dev` mode.
+- Compose runs one Kafka broker with replication factor 1 and Keycloak in `start-dev` mode. The Kubernetes and AWS
+  path runs Keycloak in production mode (`start`).
 - `.trivyignore` accepts CVE-2026-47884 and CVE-2026-47890 in spring-webmvc 6.2.19. The fix needs Spring Boot 4.

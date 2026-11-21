@@ -39,6 +39,7 @@ public class KeycloakDeviceCredentialProvisioner implements DeviceCredentialProv
     private static final Logger log = LoggerFactory.getLogger(KeycloakDeviceCredentialProvisioner.class);
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final String TOKEN_LIFESPAN_ATTRIBUTE = "access.token.lifespan";
     private static final long TOKEN_REFRESH_MARGIN_MS = 30_000;
 
     private record CachedToken(String value, Instant refreshAt) {}
@@ -84,6 +85,7 @@ public class KeycloakDeviceCredentialProvisioner implements DeviceCredentialProv
             String internalId = findInternalId(clientId)
                     .orElseThrow(() -> new CredentialProvisioningException(
                             Reason.NOT_FOUND, "Client " + clientId + " does not exist"));
+            ensureTokenLifespan(internalId);
             JsonNode body = authorised(token -> http.post()
                     .uri(props.adminBase() + "/clients/" + internalId + "/client-secret")
                     .header(HttpHeaders.AUTHORIZATION, bearer(token))
@@ -163,7 +165,38 @@ public class KeycloakDeviceCredentialProvisioner implements DeviceCredentialProv
         // Restricting scope to one role would need a scope mapping, which requires the realm-wide manage-realm
         // role; instead the service account is left holding only the ingest role (see configureServiceAccount).
         rep.put("fullScopeAllowed", true);
+        rep.putObject("attributes").put(TOKEN_LIFESPAN_ATTRIBUTE, props.deviceTokenLifespanSeconds());
         return rep;
+    }
+
+    /**
+     * Clients created before the lifespan was set carry no attribute and would keep the realm default, so rotation
+     * brings them in line. The full representation is sent back because a partial update replaces nested fields.
+     */
+    private void ensureTokenLifespan(String internalId) {
+        JsonNode current = authorised(token -> http.get()
+                .uri(props.adminBase() + "/clients/" + internalId)
+                .header(HttpHeaders.AUTHORIZATION, bearer(token))
+                .retrieve()
+                .body(JsonNode.class));
+        if (!(current instanceof ObjectNode client)) {
+            throw new CredentialProvisioningException(Reason.UNAVAILABLE, "Keycloak returned an empty response");
+        }
+        String wanted = props.deviceTokenLifespanSeconds();
+        JsonNode existing = client.path("attributes").path(TOKEN_LIFESPAN_ATTRIBUTE);
+        if (existing.isTextual() && wanted.equals(existing.asText())) {
+            return;
+        }
+        ObjectNode update = client.deepCopy();
+        ObjectNode attributes = update.path("attributes") instanceof ObjectNode a ? a : update.putObject("attributes");
+        attributes.put(TOKEN_LIFESPAN_ATTRIBUTE, wanted);
+        authorised(token -> http.put()
+                .uri(props.adminBase() + "/clients/" + internalId)
+                .header(HttpHeaders.AUTHORIZATION, bearer(token))
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(update)
+                .retrieve()
+                .toBodilessEntity());
     }
 
     /**

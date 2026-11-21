@@ -90,6 +90,51 @@ class RowLevelSecurityIT extends AbstractIntegrationTest {
     }
 
     @Test
+    void applicationRoleCannotCreateSchemasAndRegistrationCreatesNone() throws Exception {
+        assertThat(appJdbc.queryForObject(
+                        "SELECT has_database_privilege(current_user, current_database(), 'CREATE')", Boolean.class))
+                .isFalse();
+
+        registerTenant("tenant-rls-noschema");
+
+        assertThat(jdbc.queryForObject(
+                        "SELECT count(*) FROM information_schema.schemata WHERE schema_name LIKE 'ts\\_%'",
+                        Integer.class))
+                .isZero();
+    }
+
+    @Test
+    void settingsOfAnotherTenantAreNeitherVisibleNorWritable() {
+        jdbc.update(
+                "INSERT INTO platform.tenant_settings (tenant_id, setting_key, setting_value) "
+                        + "VALUES (?, 'rls_probe', 'b') ON CONFLICT DO NOTHING",
+                tenantB);
+        try (TenantScope scope = TenantScope.tenant(tenantA)) {
+            assertThat(appJdbc.queryForList("SELECT tenant_id FROM platform.tenant_settings", UUID.class))
+                    .isNotEmpty()
+                    .containsOnly(tenantA);
+            assertThat(appJdbc.update(
+                            "UPDATE platform.tenant_settings SET setting_value = 'x' WHERE tenant_id = ?", tenantB))
+                    .isZero();
+            assertThat(appJdbc.update("DELETE FROM platform.tenant_settings WHERE tenant_id = ?", tenantB))
+                    .isZero();
+            assertThatThrownBy(() -> appJdbc.update(
+                            "INSERT INTO platform.tenant_settings (tenant_id, setting_key, setting_value) "
+                                    + "VALUES (?, 'foreign', 'x')",
+                            tenantB))
+                    .isInstanceOf(DataAccessException.class)
+                    .hasStackTraceContaining("row-level security");
+        }
+        assertThat(jdbc.queryForObject(
+                        "SELECT setting_value FROM platform.tenant_settings "
+                                + "WHERE tenant_id = ? AND setting_key = 'rls_probe'",
+                        String.class,
+                        tenantB))
+                .isEqualTo("b");
+        assertThat(count(appJdbc, "platform.tenant_settings")).isZero();
+    }
+
+    @Test
     void queryWithoutTenantFilterCannotSeeAnotherTenantsRow() {
         try (TenantScope scope = TenantScope.tenant(tenantA)) {
             assertThat(devices.findById(deviceB)).isEmpty();

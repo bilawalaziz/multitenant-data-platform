@@ -1,0 +1,16 @@
+# Traces in S3 (bucket and KMS key from deploy/terraform). No credentials here: the AWS SDK uses the EKS Pod Identity
+# credentials of the observability/tempo service account.
+tempo:
+  retention: 168h
+  storage:
+    trace:
+      backend: s3
+      wal:
+        path: /var/tempo/wal
+      local: null
+      s3:
+        bucket: {{ .Values.tempoBucket }}
+        endpoint: s3.{{ .Values.region }}.amazonaws.com
+        region: {{ .Values.region }}
+persistence:
+  size: 5Gi

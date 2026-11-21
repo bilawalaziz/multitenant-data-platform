@@ -6,6 +6,7 @@ spring:
   application:
     name: sensor-ingestion-platform
   datasource:
+    # TLS is chosen in the URL (…/sensor_platform?sslmode=require on RDS); no separate setting exists or is needed.
     url: ${DB_URL:jdbc:postgresql://localhost:5433/sensor_platform}
     # The application role is not the table owner and is subject to row-level security.
     username: ${DB_USER:sensor_app}
@@ -50,10 +51,17 @@ spring:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
       password: ${REDIS_PASSWORD:}
+      ssl:
+        enabled: ${REDIS_SSL:false}
       # Bounds how long a rate limit check can delay a request when Redis is slow or unreachable.
       timeout: 200ms
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9094}
+    properties:
+      # Shared by the producer and the admin client. PLAINTEXT locally; SASL_SSL with SCRAM on MSK. The SASL login
+      # (sasl.jaas.config) is added from KAFKA_SASL_USERNAME/KAFKA_SASL_PASSWORD by KafkaSaslConfig.
+      security.protocol: ${KAFKA_SECURITY_PROTOCOL:PLAINTEXT}
+      sasl.mechanism: ${KAFKA_SASL_MECHANISM:SCRAM-SHA-512}
     producer:
       acks: all
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
@@ -88,6 +96,8 @@ platform:
       realm: sensor-platform
       client-id: ${PROVISIONER_CLIENT_ID:sensor-platform-provisioner}
       client-secret: ${PROVISIONER_CLIENT_SECRET:}
+      # Access-token lifetime of device clients; tenant-wide clients keep the realm default.
+      device-token-lifespan: 300s
   ingestion:
     max-payload-bytes: 65536
   rate-limit:
@@ -111,7 +121,7 @@ platform:
     #     refill-per-second: 500
   kafka:
     topic-partitions: 3
-    topic-replication-factor: 1
+    topic-replication-factor: ${KAFKA_TOPIC_REPLICATION_FACTOR:1}
     admin-timeout-ms: 5000
     send-timeout-ms: 12000
   outbox:

@@ -13,6 +13,8 @@ import com.platform.ingestion.security.DeviceBindingPolicy;
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterAll;
@@ -368,6 +370,122 @@ class DeviceCredentialsIT extends AbstractIntegrationTest {
         }
         mvc.perform(post(path + "/credentials").header("Authorization", bearer(PLATFORM_ADMIN)))
                 .andExpect(status().isOk());
+    }
+
+    private String ingestionsPath() {
+        return "/api/v1/tenants/" + TENANT + "/ingestions";
+    }
+
+    private JsonNode listAs(String token) throws Exception {
+        return body(getAs(token, ingestionsPath() + "?limit=200")
+                .andExpect(status().isOk())
+                .andReturn());
+    }
+
+    private Set<String> devicesIn(JsonNode list) {
+        Set<String> ids = new HashSet<>();
+        list.forEach(n -> ids.add(n.get("deviceId").asText()));
+        return ids;
+    }
+
+    private String ingestedId(String device) throws Exception {
+        register(device);
+        ingest(deviceToken(device), uniqueKey(), payloadFor(device)).andExpect(status().isAccepted());
+        return storedIdOf(device);
+    }
+
+    private String storedIdOf(String device) {
+        return jdbc.queryForObject(
+                "SELECT id::text FROM platform.ingestion_records WHERE tenant_id = ? AND device_id = ? "
+                        + "ORDER BY received_at DESC LIMIT 1",
+                String.class,
+                tenantId,
+                device);
+    }
+
+    @Test
+    void deviceTokenListsOnlyItsOwnReadingsAndAnotherDevicesRecordIsNotFound() throws Exception {
+        String own = uniqueDevice();
+        String other = uniqueDevice();
+        String ownId = ingestedId(own);
+        String otherId = ingestedId(other);
+
+        assertThat(devicesIn(listAs(deviceToken(own)))).containsExactly(own);
+        getAs(deviceToken(own), ingestionsPath() + "/" + ownId)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.deviceId").value(own));
+        getAs(deviceToken(own), ingestionsPath() + "/" + otherId).andExpect(status().isNotFound());
+    }
+
+    @Test
+    void foreignRecordIsIndistinguishableFromOneThatDoesNotExist() throws Exception {
+        String own = uniqueDevice();
+        String other = uniqueDevice();
+        register(own);
+        String otherId = ingestedId(other);
+
+        String foreign = getAs(deviceToken(own), ingestionsPath() + "/" + otherId)
+                .andExpect(status().isNotFound())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        String missing = getAs(deviceToken(own), ingestionsPath() + "/" + UUID.randomUUID())
+                .andExpect(status().isNotFound())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+
+        assertThat(mapper.readTree(foreign).get("errorCode"))
+                .isEqualTo(mapper.readTree(missing).get("errorCode"));
+        assertThat(mapper.readTree(foreign).get("message"))
+                .isEqualTo(mapper.readTree(missing).get("message"));
+    }
+
+    @Test
+    void deactivatedDeviceTokenIsRefusedOnListAndDetail() throws Exception {
+        String device = uniqueDevice();
+        String id = ingestedId(device);
+        mvc.perform(post("/api/v1/tenants/" + TENANT + "/devices/" + device + "/deactivate")
+                        .header("Authorization", bearer(tenantAdmin(TENANT))))
+                .andExpect(status().isOk());
+
+        getAs(deviceToken(device), ingestionsPath())
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.errorCode").value("DEVICE_NOT_REGISTERED"));
+        getAs(deviceToken(device), ingestionsPath() + "/" + id)
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.errorCode").value("DEVICE_NOT_REGISTERED"));
+    }
+
+    @Test
+    void tenantWideTokenCannotReadWhileTheFlagIsOffButAdminsAndDeviceTokensCan() throws Exception {
+        String device = uniqueDevice();
+        String id = ingestedId(device);
+        ReflectionTestUtils.setField(bindingPolicy, "tenantWideEnabled", false);
+
+        getAs(tenantIngest(TENANT), ingestionsPath())
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.errorCode").value("DEVICE_CREDENTIAL_REQUIRED"));
+        getAs(tenantIngest(TENANT), ingestionsPath() + "/" + id)
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.errorCode").value("DEVICE_CREDENTIAL_REQUIRED"));
+        assertThat(devicesIn(listAs(tenantAdmin(TENANT)))).contains(device);
+        assertThat(devicesIn(listAs(PLATFORM_ADMIN))).contains(device);
+        getAs(tenantAdmin(TENANT), ingestionsPath() + "/" + id).andExpect(status().isOk());
+        assertThat(devicesIn(listAs(deviceToken(device)))).containsExactly(device);
+    }
+
+    @Test
+    void adminsAndTenantWideTokenStillSeeEveryDeviceWhileTheFlagIsOn() throws Exception {
+        String first = uniqueDevice();
+        String second = uniqueDevice();
+        String firstId = ingestedId(first);
+        ingestedId(second);
+
+        for (String token : new String[] {tenantIngest(TENANT), tenantAdmin(TENANT), PLATFORM_ADMIN}) {
+            assertThat(devicesIn(listAs(token))).contains(first, second);
+            getAs(token, ingestionsPath() + "/" + firstId).andExpect(status().isOk());
+        }
     }
 
     private JsonNode issue(String device) throws Exception {

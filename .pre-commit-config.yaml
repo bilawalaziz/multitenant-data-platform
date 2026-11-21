@@ -9,6 +9,8 @@ repos:
         exclude: \.cmd$
       - id: check-yaml
         args: [--allow-multiple-documents]
+        # Helm templates are Go templates, not YAML until rendered
+        exclude: ^deploy/helm/[^/]+/templates/
       - id: check-json
       - id: check-merge-conflict
       - id: check-added-large-files

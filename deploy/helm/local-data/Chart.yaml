@@ -1,0 +1,7 @@
+apiVersion: v2
+name: local-data
+description: LOCAL ONLY stand-ins for RDS, ElastiCache and MSK (PostgreSQL, Redis, single-broker Kafka with SASL/SCRAM)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.29.0-0"

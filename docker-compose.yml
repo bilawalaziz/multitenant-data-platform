@@ -220,7 +220,6 @@ services:
         condition: service_started
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      TOPICS: ${CONSUMER_TOPICS:-tenant-alpha.readings,tenant-beta.readings}
       GROUP_ID: ${CONSUMER_GROUP_ID:-sensor-readings-consumer}
       # Shared with the application's rate limiter; dedup state lives here so replicas see each other's events.
       REDIS_HOST: redis

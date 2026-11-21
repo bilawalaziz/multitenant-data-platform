@@ -1,0 +1,6 @@
+ingress:
+  enabled: true
+  ingressClassName: traefik
+  hosts: [grafana.localtest.me]
+  path: /
+  pathType: Prefix

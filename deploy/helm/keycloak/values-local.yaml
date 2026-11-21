@@ -1,0 +1,12 @@
+hostname: http://keycloak.localtest.me
+replicas: 1
+db: {host: postgres, port: 5432, name: keycloak, sslmode: ""}
+externalSecrets:
+  refreshInterval: 1m
+resources:
+  requests: {cpu: 150m, memory: 640Mi}
+  limits: {memory: 1Gi}
+ingress:
+  enabled: true
+  className: traefik
+  hosts: [keycloak.localtest.me]

@@ -12,5 +12,10 @@ public interface IngestionRecordRepository extends JpaRepository<IngestionRecord
 
     List<IngestionRecord> findByTenantIdOrderByReceivedAtDesc(UUID tenantId, Pageable pageable);
 
+    Optional<IngestionRecord> findByIdAndTenantIdAndDeviceId(UUID id, UUID tenantId, String deviceId);
+
+    List<IngestionRecord> findByTenantIdAndDeviceIdOrderByReceivedAtDesc(
+            UUID tenantId, String deviceId, Pageable pageable);
+
     long countByTenantId(UUID tenantId);
 }

@@ -1,0 +1,25 @@
+# Two installs of this chart share one template set:
+#   caConfigMap.enabled   local only, installed BEFORE External Secrets: the pods mount the emulator CA at start
+#   store.enabled         every environment, installed AFTER External Secrets: its CRDs must exist
+
+namespace: external-secrets
+
+caConfigMap:
+  enabled: false
+  name: emulator-ca
+  # Content of the emulator CA certificate (helmfile passes it with --set-file).
+  caPem: ""
+
+store:
+  enabled: false
+  # Name the application charts reference as externalSecrets.storeRef.
+  name: aws-secrets
+  region: us-east-1
+  # AWS: empty. External Secrets signs requests with the EKS Pod Identity credentials of its service account
+  # (external-secrets/external-secrets, bound to the Terraform role). Local: dummy static credentials, which the
+  # emulator (auth off) ignores.
+  staticCredentials:
+    enabled: false
+    secretName: emulator-aws-creds
+    accessKey: test
+    secretKey: test

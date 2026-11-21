@@ -1,0 +1,203 @@
+# Defaults are environment neutral. values-local.yaml and values-aws.yaml carry the differences.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # Single registry value: "k3d-sensor-registry:5000" locally, the ECR registry host on AWS.
+  registry: ""
+  pullPolicy: IfNotPresent
+  # An empty tag means the chart appVersion.
+  app: {repository: sensor-platform/app, tag: ""}
+  consumer: {repository: sensor-platform/consumer, tag: ""}
+
+# Non-secret settings, named as application.yml and consumer.py read them.
+config:
+  # Empty keeps the image default (docker). "prod" turns on the strict ProdRequiredSettings checks.
+  springProfiles: ""
+  javaOpts: "-XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError -Xss512k"
+  db:
+    host: postgres
+    port: 5432
+    name: sensor_platform
+    # JDBC TLS mode ("require" on RDS); empty adds no parameter.
+    sslmode: ""
+  redis:
+    host: redis
+    port: 6379
+    ssl: false
+  kafka:
+    bootstrapServers: kafka:9092
+    securityProtocol: PLAINTEXT
+    saslMechanism: SCRAM-SHA-512
+    topicReplicationFactor: 1
+  keycloak:
+    # What the token "iss" claim says (public URL); the JWK set is fetched from the in-cluster address.
+    issuerUri: http://keycloak.localtest.me/realms/sensor-platform
+    jwkSetUri: http://keycloak:8080/realms/sensor-platform/protocol/openid-connect/certs
+    adminUrl: http://keycloak:8080
+    provisionerClientId: sensor-platform-provisioner
+  tracing:
+    otlpEndpoint: http://otel-collector.observability:4318
+    exportEnabled: true
+    samplingProbability: "1.0"
+  consumer:
+    groupId: sensor-readings-consumer
+    dedupTtlSeconds: 604800
+  # Extra environment variables of the app / consumer.
+  appEnv: {}
+  consumerEnv: {}
+
+# --- secrets ------------------------------------------------------------------------------------------------------
+externalSecrets:
+  # true: ExternalSecret objects read AWS Secrets Manager. false: a plain Secret is rendered from plainSecrets
+  # (tests and throwaway clusters only; the values end up in the release).
+  enabled: true
+  storeRef: {name: aws-secrets, kind: ClusterSecretStore}
+  refreshInterval: 1h
+  # Secrets Manager names are <prefix>/<key>, as created by deploy/terraform/modules/secrets.
+  prefix: sensor-platform
+
+# Kubernetes Secret -> environment variable -> Secrets Manager key and JSON property.
+secretMap:
+  app:
+    DB_USER: {key: db/app, property: username}
+    DB_PASSWORD: {key: db/app, property: password}
+    DB_MIGRATION_USER: {key: db/owner, property: username}
+    DB_MIGRATION_PASSWORD: {key: db/owner, property: password}
+    REDIS_PASSWORD: {key: redis/auth, property: auth_token}
+    KAFKA_SASL_USERNAME: {key: kafka/app, property: username}
+    KAFKA_SASL_PASSWORD: {key: kafka/app, property: password}
+    PROVISIONER_CLIENT_SECRET: {key: keycloak/provisioner, property: client_secret}
+  consumer:
+    REDIS_PASSWORD: {key: redis/auth, property: auth_token}
+    KAFKA_SASL_USERNAME: {key: kafka/app, property: username}
+    KAFKA_SASL_PASSWORD: {key: kafka/app, property: password}
+  # Read by the db-bootstrap hook only. The master credentials are added from dbBootstrap.master.secretId.
+  dbBootstrap:
+    OWNER_USER: {key: db/owner, property: username}
+    OWNER_PASSWORD: {key: db/owner, property: password}
+    APP_USER: {key: db/app, property: username}
+    APP_PASSWORD: {key: db/app, property: password}
+    KEYCLOAK_DB_USER: {key: db/keycloak, property: username}
+    KEYCLOAK_DB_PASSWORD: {key: db/keycloak, property: password}
+
+# Used only when externalSecrets.enabled is false: environment variable -> value.
+plainSecrets: {}
+
+# --- database bootstrap hook ----------------------------------------------------------------------------------------
+dbBootstrap:
+  enabled: true
+  image: {repository: postgres, tag: 17-alpine}
+  # "require" when the server speaks TLS (RDS).
+  sslmode: ""
+  master:
+    # Either an existing Secret (the local-data superuser) ...
+    existingSecret: postgres-superuser
+    usernameKey: username
+    passwordKey: password
+    # ... or a Secrets Manager name/ARN read through External Secrets (the RDS managed "rds!db-..." secret).
+    secretId: ""
+  # Role and database Keycloak uses; the password comes from the db/keycloak secret.
+  keycloak: {enabled: true, database: keycloak}
+  activeDeadlineSeconds: 900
+  backoffLimit: 3
+  resources:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {memory: 128Mi}
+  # Removes the master credentials copy (the ExternalSecret and the Secret it owns) once the job succeeded.
+  cleanup:
+    enabled: true
+    image: {repository: bitnamilegacy/kubectl, tag: 1.33.4}
+
+# --- workloads ------------------------------------------------------------------------------------------------------
+app:
+  replicas: 2
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {memory: 768Mi}
+  # Spring Boot with a Kafka client and Hibernate needs a while on a small node.
+  startupProbe: {failureThreshold: 36, periodSeconds: 5}
+  livenessProbe: {periodSeconds: 10, timeoutSeconds: 3, failureThreshold: 3}
+  readinessProbe: {periodSeconds: 5, timeoutSeconds: 3, failureThreshold: 3}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  podAnnotations: {}
+  serviceAccount:
+    create: true
+    name: ""
+    # Annotations only; no AWS role is attached (the app calls no AWS API).
+    annotations: {}
+  service:
+    type: ClusterIP
+    apiPort: 8080
+    managementPort: 8081
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts: []
+    tls: []
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+consumer:
+  replicas: 2
+  resources:
+    requests: {cpu: 50m, memory: 96Mi}
+    limits: {memory: 192Mi}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  podAnnotations: {}
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  # Numeric, because the images name their user and the kubelet cannot verify a name against runAsNonRoot.
+  runAsUser: 10001
+  runAsGroup: 10001
+  seccompProfile: {type: RuntimeDefault}
+
+imagePullSecrets: []
+
+# --- network policies ---------------------------------------------------------------------------------------------
+# Peers are NetworkPolicyPeer lists: pod/namespace selectors in a cluster, ipBlock for managed services. A target with
+# no peers is not allowed at all.
+networkPolicy:
+  enabled: true
+  dns:
+    peers:
+      - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+        podSelector: {matchLabels: {k8s-app: kube-dns}}
+  app:
+    ingressFrom: []
+    # Extra port the ingressFrom peers may reach, for a load balancer health check on the management port.
+    ingressHealthCheckPort: null
+    prometheusFrom: []
+    egress:
+      postgres: {peers: [], ports: [5432]}
+      redis: {peers: [], ports: [6379]}
+      kafka: {peers: [], ports: [9092]}
+      keycloak: {peers: [], ports: [8080]}
+      otel: {peers: [], ports: [4318]}
+  consumer:
+    egress:
+      kafka: {peers: [], ports: [9092]}
+      redis: {peers: [], ports: [6379]}
+      otel: {peers: [], ports: [4318]}
+  dbBootstrap:
+    egress:
+      postgres: {peers: [], ports: [5432]}

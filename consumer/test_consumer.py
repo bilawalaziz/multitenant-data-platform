@@ -111,6 +111,43 @@ def store_on(fake, ttl=604800):
     return c.DedupStore(fake, ttl)
 
 
+class SecurityConfigTest(unittest.TestCase):
+    def test_plaintext_default_adds_nothing(self):
+        self.assertEqual(c.kafka_security_config({}), {})
+        self.assertEqual(c.kafka_security_config({"KAFKA_SECURITY_PROTOCOL": "PLAINTEXT"}), {})
+
+    def test_sasl_ssl_scram_maps_to_librdkafka_keys(self):
+        env = {
+            "KAFKA_SECURITY_PROTOCOL": "SASL_SSL",
+            "KAFKA_SASL_MECHANISM": "SCRAM-SHA-512",
+            "KAFKA_SASL_USERNAME": "app",
+            "KAFKA_SASL_PASSWORD": "pw",
+        }
+        self.assertEqual(
+            c.kafka_security_config(env),
+            {
+                "security.protocol": "sasl_ssl",
+                "sasl.mechanisms": "SCRAM-SHA-512",
+                "sasl.username": "app",
+                "sasl.password": "pw",
+            },
+        )
+
+    def test_ssl_only_ignores_sasl_variables(self):
+        env = {"KAFKA_SECURITY_PROTOCOL": "SSL", "KAFKA_SASL_USERNAME": "app"}
+        self.assertEqual(c.kafka_security_config(env), {"security.protocol": "ssl"})
+
+    def test_redis_ssl_flag(self):
+        self.assertFalse(c.redis_ssl_enabled({}))
+        self.assertFalse(c.redis_ssl_enabled({"REDIS_SSL": "false"}))
+        self.assertTrue(c.redis_ssl_enabled({"REDIS_SSL": "true"}))
+
+    def test_from_env_passes_redis_ssl_to_the_client(self):
+        with mock.patch.dict(os.environ, {"REDIS_SSL": "true"}):
+            store = c.DedupStore.from_env()
+        self.assertIs(store.client.connection_pool.connection_class, redis.SSLConnection)
+
+
 class DedupTest(unittest.TestCase):
     def setUp(self):
         self.fake = FakeRedis()
@@ -339,6 +376,49 @@ class RedisOutageTest(unittest.TestCase):
         self.assertTrue(self.deliver(FakeRecord(json.dumps(good()), 1))[0])
         self.assertTrue(self.deliver(FakeRecord(b"junk", 2))[0])
         self.assertEqual(self.kafka.commits, [0, 1, 2])
+
+
+class SubscriptionTest(unittest.TestCase):
+    def test_defaults_to_the_readings_pattern(self):
+        self.assertEqual(c.subscription_topics({}), [r"^.*\.readings$"])
+
+    def test_pattern_from_environment(self):
+        self.assertEqual(c.subscription_topics({"TOPIC_PATTERN": r"^acme-.*\.readings$"}), [r"^acme-.*\.readings$"])
+
+    def test_explicit_topics_win_over_the_pattern(self):
+        env = {"TOPICS": " a.readings, b.readings ,", "TOPIC_PATTERN": "^x$"}
+        self.assertEqual(c.subscription_topics(env), ["a.readings", "b.readings"])
+
+    def test_blank_topics_fall_back_to_the_pattern(self):
+        self.assertEqual(c.subscription_topics({"TOPICS": " , "}), [c.DEFAULT_TOPIC_PATTERN])
+
+    def test_main_subscribes_with_the_pattern_and_rebalance_callbacks(self):
+        fake = mock.MagicMock()
+        fake.poll.side_effect = KeyboardInterrupt
+        kafka = mock.MagicMock(Consumer=mock.MagicMock(return_value=fake), KafkaException=Exception)
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.dict("sys.modules", {"confluent_kafka": kafka}):
+            with mock.patch.object(c.DedupStore, "from_env", return_value=mock.MagicMock()):
+                with redirect_stdout(io.StringIO()):
+                    with self.assertRaises(KeyboardInterrupt):
+                        c.main()
+        fake.subscribe.assert_called_once_with([c.DEFAULT_TOPIC_PATTERN], on_assign=c.on_assign, on_revoke=c.on_revoke)
+
+    def test_assignment_callbacks_log_the_partitions(self):
+        parts = [
+            mock.Mock(topic="tenant-alpha.readings", partition=0),
+            mock.Mock(topic="tenant-beta.readings", partition=2),
+        ]
+        for callback, msg in ((c.on_assign, "partitions assigned"), (c.on_revoke, "partitions revoked")):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                callback(None, parts)
+            rec = json.loads(buf.getvalue())
+            self.assertEqual(rec["msg"], msg)
+            self.assertEqual(rec["count"], 2)
+            self.assertEqual(
+                rec["partitions"],
+                [{"topic": "tenant-alpha.readings", "partition": 0}, {"topic": "tenant-beta.readings", "partition": 2}],
+            )
 
 
 if __name__ == "__main__":
