@@ -1,0 +1,26 @@
+# Helm values for external-secrets 2.15.0 against the AWS Emulator.
+# The emulator certificate only names localhost/127.0.0.1/::1, so a socat
+# sidecar exposes the emulator on the pod's own 127.0.0.1:9297 and the
+# endpoint override points there; the emulator CA is mounted for verification.
+extraEnv:
+  - name: AWS_SECRETSMANAGER_ENDPOINT
+    value: https://127.0.0.1:9297
+  - name: AWS_STS_ENDPOINT
+    value: https://127.0.0.1:9297
+  - name: AWS_CA_BUNDLE
+    value: /etc/emulator-ca/ca.pem
+extraVolumes:
+  - name: emulator-ca
+    configMap:
+      name: emulator-ca
+extraVolumeMounts:
+  - name: emulator-ca
+    mountPath: /etc/emulator-ca
+    readOnly: true
+extraContainers:
+  - name: emulator-tunnel
+    image: alpine/socat:1.8.0.1
+    args: ["TCP-LISTEN:9297,bind=127.0.0.1,fork,reuseaddr", "TCP:sensor-spike-emulator:9297"]
+    resources:
+      requests: {cpu: 5m, memory: 8Mi}
+      limits: {memory: 32Mi}

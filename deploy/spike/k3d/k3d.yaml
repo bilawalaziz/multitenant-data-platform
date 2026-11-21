@@ -1,0 +1,30 @@
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: sensor-spike
+servers: 1
+agents: 0
+image: rancher/k3s:v1.33.5-k3s1
+# Shared with the emulator container so pods can resolve it by name.
+network: sensor-spike-net
+kubeAPI:
+  host: 127.0.0.1
+  hostIP: 127.0.0.1
+  hostPort: "6550"
+registries:
+  create:
+    name: sensor-spike-registry
+    hostPort: "5001"
+options:
+  k3d:
+    wait: true
+    timeout: 180s
+  k3s:
+    extraArgs:
+      # Keep the footprint small next to the compose stack.
+      - arg: --disable=traefik
+        nodeFilters: [server:*]
+      - arg: --disable=metrics-server
+        nodeFilters: [server:*]
+      - arg: --disable=servicelb
+        nodeFilters: [server:*]
