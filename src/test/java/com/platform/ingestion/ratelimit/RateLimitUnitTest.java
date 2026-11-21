@@ -16,6 +16,7 @@ class RateLimitUnitTest {
     private final RateLimitProperties properties = new RateLimitProperties(
             true,
             Duration.ofSeconds(2),
+            Duration.ofSeconds(2),
             new Limit(400, 200),
             new Limit(20, 10),
             Map.of(

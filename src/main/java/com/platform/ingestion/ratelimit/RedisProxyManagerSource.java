@@ -13,7 +13,6 @@ import io.lettuce.core.codec.ByteArrayCodec;
 import io.lettuce.core.codec.RedisCodec;
 import io.lettuce.core.codec.StringCodec;
 import java.time.Duration;
-import java.util.concurrent.atomic.AtomicBoolean;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
 import org.springframework.stereotype.Component;
@@ -30,40 +29,31 @@ public class RedisProxyManagerSource implements DisposableBean {
     private static final Duration KEEP_AFTER_REFILL = Duration.ofSeconds(30);
 
     private final RedisProperties redis;
-    private final AtomicBoolean connecting = new AtomicBoolean();
+    private final RateLimitProperties limits;
     private volatile RedisClient client;
     private volatile StatefulRedisConnection<String, byte[]> connection;
     private volatile ProxyManager<String> proxyManager;
 
-    public RedisProxyManagerSource(RedisProperties redis) {
+    public RedisProxyManagerSource(RedisProperties redis, RateLimitProperties limits) {
         this.redis = redis;
+        this.limits = limits;
     }
 
-    /**
-     * @return the proxy manager, or null while another thread is connecting; no caller ever waits for a connect
-     */
-    ProxyManager<String> get() {
-        ProxyManager<String> ready = proxyManager;
-        if (ready != null) {
-            return ready;
-        }
-        if (!connecting.compareAndSet(false, true)) {
-            return null;
-        }
-        try {
-            return connect();
-        } finally {
-            connecting.set(false);
-        }
+    /** @return the proxy manager once connected, otherwise null; never blocks */
+    ProxyManager<String> connected() {
+        return proxyManager;
     }
 
-    private ProxyManager<String> connect() {
-        Duration timeout = redis.getTimeout() != null ? redis.getTimeout() : Duration.ofMillis(200);
+    /** Blocking; call from a background thread only. */
+    ProxyManager<String> connect() {
+        Duration commandTimeout = redis.getTimeout() != null ? redis.getTimeout() : Duration.ofMillis(200);
+        Duration connectTimeout = limits.connectTimeout();
         RedisURI.Builder uri = RedisURI.builder()
                 .withHost(redis.getHost())
                 .withPort(redis.getPort())
                 .withDatabase(redis.getDatabase())
-                .withTimeout(timeout);
+                // Also bounds the connection handshake, which a cold JVM can need more than a command's time for.
+                .withTimeout(connectTimeout);
         if (redis.getPassword() != null && !redis.getPassword().isBlank()) {
             char[] password = redis.getPassword().toCharArray();
             if (redis.getUsername() != null && !redis.getUsername().isBlank()) {
@@ -76,12 +66,14 @@ public class RedisProxyManagerSource implements DisposableBean {
         created.setOptions(ClientOptions.builder()
                 // Fail commands at once while the connection is down instead of queueing them behind a reconnect.
                 .disconnectedBehavior(ClientOptions.DisconnectedBehavior.REJECT_COMMANDS)
-                .socketOptions(SocketOptions.builder().connectTimeout(timeout).build())
-                .timeoutOptions(TimeoutOptions.enabled(timeout))
+                .socketOptions(
+                        SocketOptions.builder().connectTimeout(connectTimeout).build())
+                .timeoutOptions(TimeoutOptions.enabled())
                 .build());
         try {
             StatefulRedisConnection<String, byte[]> opened =
                     created.connect(RedisCodec.of(StringCodec.UTF8, ByteArrayCodec.INSTANCE), uri.build());
+            opened.setTimeout(commandTimeout);
             ProxyManager<String> manager = LettuceBasedProxyManager.builderFor(opened)
                     .withExpirationStrategy(
                             ExpirationAfterWriteStrategy.basedOnTimeForRefillingBucketUpToMax(KEEP_AFTER_REFILL))

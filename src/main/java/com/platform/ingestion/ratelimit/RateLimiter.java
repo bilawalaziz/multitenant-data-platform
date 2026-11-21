@@ -9,9 +9,11 @@ import io.github.bucket4j.Bandwidth;
 import io.github.bucket4j.BucketConfiguration;
 import io.github.bucket4j.ConsumptionProbe;
 import io.github.bucket4j.distributed.proxy.ProxyManager;
+import jakarta.annotation.PostConstruct;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,6 +37,7 @@ public class RateLimiter {
     private final AtomicLong lastWarnNanos = new AtomicLong(System.nanoTime() - WARN_INTERVAL_NANOS);
     private final AtomicLong suppressedWarnings = new AtomicLong();
     private final AtomicLong skipUntilNanos = new AtomicLong();
+    private final AtomicBoolean connecting = new AtomicBoolean();
 
     public RateLimiter(RateLimitProperties properties, RedisProxyManagerSource proxyManagers, PlatformMetrics metrics) {
         this.properties = properties;
@@ -58,9 +61,10 @@ public class RateLimiter {
         }
         ConsumptionProbe probe;
         try {
-            ProxyManager<String> manager = proxyManagers.get();
+            ProxyManager<String> manager = proxyManagers.connected();
             if (manager == null) {
-                // Another thread is connecting; do not queue behind it.
+                // Never connect on the request path: start it in the background and admit meanwhile.
+                connectInBackground();
                 metrics.rateLimitSkipped();
                 return;
             }
@@ -82,6 +86,35 @@ public class RateLimiter {
                     null,
                     Map.of("Retry-After", Long.toString(seconds)));
         }
+    }
+
+    /** Connects at startup without delaying boot; requests are admitted unchecked until it succeeds. */
+    @PostConstruct
+    public void connectAtStartup() {
+        if (properties.enabled()) {
+            connectInBackground();
+        }
+    }
+
+    private void connectInBackground() {
+        if (!connecting.compareAndSet(false, true)) {
+            return;
+        }
+        Thread thread = new Thread(
+                () -> {
+                    try {
+                        proxyManagers.connect();
+                        skipUntilNanos.set(0);
+                    } catch (RuntimeException e) {
+                        // Opens the breaker, so the next attempt waits for the cooldown.
+                        onStoreFailure(e);
+                    } finally {
+                        connecting.set(false);
+                    }
+                },
+                "ratelimit-connect");
+        thread.setDaemon(true);
+        thread.start();
     }
 
     /**
