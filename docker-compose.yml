@@ -121,6 +121,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # Not waited on for health: the exporter retries, and a missing collector must not stop ingestion.
+      otel-collector:
+        condition: service_started
     environment:
       DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-sensor_platform}
       # runtime connections use the restricted application role; Flyway migrates as the owner
@@ -139,6 +142,10 @@ services:
       PROVISIONER_CLIENT_ID: sensor-platform-provisioner
       PROVISIONER_CLIENT_SECRET: ${PROVISIONER_CLIENT_SECRET:?set in .env}
       JAVA_OPTS: "-XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError -Xss512k"
+      # base URL of the collector's OTLP/HTTP receiver; the application appends /v1/traces
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      TRACING_EXPORT_ENABLED: "true"
+      TRACING_SAMPLING_PROBABILITY: ${TRACING_SAMPLING_PROBABILITY:-1.0}
     ports:
       - "${APP_HOST_PORT:-8080}:8080"
       # management port for local diagnostics only
@@ -153,6 +160,30 @@ services:
       - prometheus-data:/prometheus
     ports:
       - "${PROMETHEUS_HOST_PORT:-9090}:9090"
+    mem_limit: 384m
+
+  # No healthchecks for the next two: their images are minimal (no shell, wget or curl) to run one into.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.165.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./infra/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+    # No published ports: the application and the consumer reach it on the compose network.
+    depends_on:
+      - tempo
+    restart: unless-stopped
+    mem_limit: 256m
+
+  tempo:
+    image: grafana/tempo:2.10.10
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./infra/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      # Trace lookup by id (GET /api/traces/<id>) for the demo and for debugging; the host only.
+      - "127.0.0.1:${TEMPO_HOST_PORT:-3200}:3200"
+    restart: unless-stopped
     mem_limit: 384m
 
   grafana:
@@ -171,6 +202,7 @@ services:
       - "${GRAFANA_HOST_PORT:-3000}:3000"
     depends_on:
       - prometheus
+      - tempo
     mem_limit: 384m
 
   consumer:
@@ -179,11 +211,15 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       TOPICS: ${CONSUMER_TOPICS:-tenant-alpha.readings,tenant-beta.readings}
       GROUP_ID: ${CONSUMER_GROUP_ID:-sensor-readings-consumer}
       DEDUP_DB_PATH: /data/dedup.sqlite
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: sensor-consumer
     volumes:
       - consumer-data:/data
     restart: unless-stopped
@@ -195,4 +231,5 @@ volumes:
   redis-data:
   prometheus-data:
   grafana-data:
+  tempo-data:
   consumer-data:
