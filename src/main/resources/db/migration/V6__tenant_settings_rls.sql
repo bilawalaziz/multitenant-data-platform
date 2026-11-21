@@ -21,17 +21,25 @@ CREATE POLICY tenant_isolation ON platform.tenant_settings
 -- Copy what the per-tenant tables hold. Those schemas and tables were created by the application role, so they are
 -- owned by it: a superuser migration role reads them directly, but a non-superuser owner has no privileges on them.
 -- In that case the copy stops with the statements to run as the application role instead of dropping settings.
+-- Existence and privileges are looked up in the catalogs by oid: resolving the table by name would itself fail with
+-- "permission denied for schema" before the message below could explain what to grant.
 DO $$
 DECLARE
     t record;
     src text;
+    schema_oid oid;
+    table_oid oid;
 BEGIN
     FOR t IN SELECT id, schema_name FROM platform.tenants ORDER BY tenant_code LOOP
         src := format('%I.tenant_settings', t.schema_name);
-        IF to_regclass(src) IS NULL THEN
+        SELECT n.oid, c.oid INTO schema_oid, table_oid
+        FROM pg_namespace n
+        JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = 'tenant_settings' AND c.relkind = 'r'
+        WHERE n.nspname = t.schema_name;
+        IF table_oid IS NULL THEN
             CONTINUE;
         END IF;
-        IF NOT has_schema_privilege(t.schema_name, 'USAGE') OR NOT has_table_privilege(src, 'SELECT') THEN
+        IF NOT has_schema_privilege(schema_oid, 'USAGE') OR NOT has_table_privilege(table_oid, 'SELECT') THEN
             RAISE EXCEPTION 'Cannot read % as %. Connected as the application role, run: GRANT USAGE ON SCHEMA % TO %; GRANT SELECT ON % TO %; then migrate again.',
                 src, current_user, quote_ident(t.schema_name), quote_ident(current_user), src, quote_ident(current_user);
         END IF;
@@ -46,8 +54,13 @@ $$;
 -- The ts_* schemas are left in place so nothing is destroyed here. After checking that platform.tenant_settings holds
 -- every setting, an operator can drop them: DROP SCHEMA ts_<code> CASCADE.
 
+-- REVOKE only removes what this role granted and otherwise just warns, so the result is checked.
 DO $$
 BEGIN
     EXECUTE format('REVOKE CREATE ON DATABASE %I FROM %I', current_database(), '${app_role}');
+    IF has_database_privilege('${app_role}', current_database(), 'CREATE') THEN
+        RAISE EXCEPTION 'Role % still has CREATE on database %, granted by another role. Revoke it as that role or as the database owner, then migrate again.',
+            '${app_role}', current_database();
+    END IF;
 END
 $$;
