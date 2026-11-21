@@ -88,6 +88,8 @@ platform:
       realm: sensor-platform
       client-id: ${PROVISIONER_CLIENT_ID:sensor-platform-provisioner}
       client-secret: ${PROVISIONER_CLIENT_SECRET:}
+      # Access-token lifetime of device clients; tenant-wide clients keep the realm default.
+      device-token-lifespan: 300s
   ingestion:
     max-payload-bytes: 65536
   rate-limit:

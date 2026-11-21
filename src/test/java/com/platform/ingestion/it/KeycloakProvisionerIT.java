@@ -93,7 +93,8 @@ class KeycloakProvisionerIT {
                 "device-identity",
                 "tenant-ingest",
                 Duration.ofSeconds(2),
-                Duration.ofSeconds(15));
+                Duration.ofSeconds(15),
+                Duration.ofSeconds(300));
     }
 
     @BeforeAll
@@ -204,6 +205,45 @@ class KeycloakProvisionerIT {
                         .get("client_id")
                         .asText())
                 .isEqualTo(credential.clientId());
+    }
+
+    @Test
+    void deviceTokenLifetimeEqualsTheConfiguredLifespan() throws Exception {
+        DeviceCredential credential = provisioner.create("tenant-alpha", uniqueDevice());
+
+        assertThat(lifetime(credential.clientId(), credential.clientSecret())).isEqualTo(300);
+    }
+
+    @Test
+    void rotationBringsAClientCreatedWithoutTheAttributeToTheConfiguredLifespan() throws Exception {
+        // A client as created before the lifespan was set: no attributes, so the realm default applies.
+        String clientId = "device-legacy-" + UUID.randomUUID().toString().substring(0, 8);
+        String secret = "legacy-it-secret-" + UUID.randomUUID();
+        String adminToken = clientCredentials("sensor-platform-provisioner", PROVISIONER_SECRET)
+                .body()
+                .get("access_token")
+                .asText();
+        int created = send(
+                "POST",
+                baseUrl + "/admin/realms/" + REALM + "/clients",
+                adminToken,
+                "{\"clientId\":\"" + clientId + "\",\"enabled\":true,\"publicClient\":false,"
+                        + "\"secret\":\"" + secret + "\",\"serviceAccountsEnabled\":true,"
+                        + "\"standardFlowEnabled\":false,\"directAccessGrantsEnabled\":false}");
+        assertThat(created).isEqualTo(201);
+        assertThat(lifetime(clientId, secret)).isEqualTo(900);
+
+        String rotated = provisioner.rotateSecret(clientId);
+
+        assertThat(lifetime(clientId, rotated)).isEqualTo(300);
+        provisioner.delete(clientId);
+    }
+
+    private static long lifetime(String clientId, String secret) throws Exception {
+        TokenReply reply = clientCredentials(clientId, secret);
+        assertThat(reply.status()).isEqualTo(200);
+        JsonNode claims = claims(reply.body().get("access_token").asText());
+        return claims.get("exp").asLong() - claims.get("iat").asLong();
     }
 
     @Test
