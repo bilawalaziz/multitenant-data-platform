@@ -81,3 +81,8 @@ output "acm_validation_records" {
     value = o.resource_record_value
   }]
 }
+
+output "vpc_id" {
+  description = "VPC id (deploy/environments/aws.yaml vpcId, used by the load balancer controller)"
+  value       = module.platform.vpc_id
+}

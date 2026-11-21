@@ -29,11 +29,15 @@ spec:
   policyTypes: [Ingress, Egress]
   ingress:
     {{- if $np.app.ingressFrom }}
-    # The ingress controller (Traefik pods, or the ALB addresses in the VPC) reaches the API port only.
+    # The ingress controller (Traefik pods, or the ALB addresses in the VPC) reaches the API port, plus the
+    # health-check port when its target-group health check probes the management port.
     - from:
         {{- toYaml $np.app.ingressFrom | nindent 8 }}
       ports:
         - {protocol: TCP, port: 8080}
+        {{- with $np.app.ingressHealthCheckPort }}
+        - {protocol: TCP, port: {{ . }}}
+        {{- end }}
     {{- end }}
     {{- if $np.app.prometheusFrom }}
     # Prometheus scrapes and the kubelet probes use the management port.

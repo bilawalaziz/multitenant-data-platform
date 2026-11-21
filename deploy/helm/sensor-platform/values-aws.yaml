@@ -93,6 +93,8 @@ networkPolicy:
       - ipBlock: {cidr: 10.20.0.0/24}
       - ipBlock: {cidr: 10.20.1.0/24}
       - ipBlock: {cidr: 10.20.2.0/24}
+    # The ALB target-group health check probes the readiness endpoint on the management port.
+    ingressHealthCheckPort: 8081
     prometheusFrom:
       - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: observability}}
         podSelector: {matchLabels: {app.kubernetes.io/name: prometheus}}

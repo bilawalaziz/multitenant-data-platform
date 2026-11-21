@@ -184,6 +184,8 @@ networkPolicy:
         podSelector: {matchLabels: {k8s-app: kube-dns}}
   app:
     ingressFrom: []
+    # Extra port the ingressFrom peers may reach, for a load balancer health check on the management port.
+    ingressHealthCheckPort: null
     prometheusFrom: []
     egress:
       postgres: {peers: [], ports: [5432]}
