@@ -8,7 +8,7 @@ COPY src ./src
 RUN --mount=type=cache,target=/root/.m2 mvn -B -q -DskipTests package \
     && cp "$(ls target/*.jar | grep -v -e '\.original$' -e '-plain\.jar$' | head -1)" /build/app.jar
 
-FROM eclipse-temurin:17.0.13_11-jre-alpine
+FROM eclipse-temurin:17.0.21.1_2-jre-alpine
 # Pick up OS package fixes published after the base image was built
 RUN apk upgrade --no-cache \
     && addgroup -S app \
